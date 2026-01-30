@@ -1,65 +1,319 @@
-import Image from "next/image";
+"use client";
+
+import { useEffect, useState, useMemo } from 'react';
+import { motion, AnimatePresence } from 'framer-motion';
+import { Search, Play, Tv2, Globe, Filter, Heart, History, X } from 'lucide-react';
+import Player from '@/components/Player';
+import clsx from 'clsx';
+
+interface Channel {
+  id: string;
+  name: string;
+  tagline?: string;
+  hls: string;
+  namespace?: string;
+  is_live?: string; // "t" or "f"
+  is_movie?: string;
+  image?: string; // This is the logo
+  header_iptv?: string;
+  url_license?: string;
+  header_license?: string;
+  jenis?: string;
+}
+
+interface PlaylistResponse {
+  country_name: string;
+  country: string;
+  info: Channel[];
+}
+
 
 export default function Home() {
+  const [playlist, setPlaylist] = useState<PlaylistResponse | null>(null);
+  const [search, setSearch] = useState("");
+  const [selectedChannel, setSelectedChannel] = useState<Channel | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  // User Preferences
+  const [favorites, setFavorites] = useState<string[]>([]);
+  const [recents, setRecents] = useState<Channel[]>([]);
+
+  // Init Data & Preferences
+  useEffect(() => {
+    // Load Preferences
+    const savedFavs = localStorage.getItem('bittv_favorites');
+    const savedRecents = localStorage.getItem('bittv_recents');
+    try {
+      if (savedFavs) setFavorites(JSON.parse(savedFavs));
+      if (savedRecents) setRecents(JSON.parse(savedRecents));
+    } catch (e) {
+      console.error("Failed to parse preferences", e);
+    }
+
+    // Load Playlist
+    fetch('/api/playlist')
+      .then(res => {
+        if (!res.ok) throw new Error("Network response was not ok");
+        return res.json();
+      })
+      .then(data => {
+        if (data && data.info) {
+          setPlaylist(data);
+        } else {
+          console.error("Invalid playlist data", data);
+        }
+        setLoading(false);
+      })
+      .catch(err => {
+        console.error(err);
+        setLoading(false);
+      });
+  }, []);
+
+  // Save Preferences
+  useEffect(() => {
+    localStorage.setItem('bittv_favorites', JSON.stringify(favorites));
+  }, [favorites]);
+
+  useEffect(() => {
+    localStorage.setItem('bittv_recents', JSON.stringify(recents));
+  }, [recents]);
+
+
+  const toggleFavorite = (e: React.MouseEvent, id: string) => {
+    e.stopPropagation();
+    if (favorites.includes(id)) {
+      setFavorites(prev => prev.filter(fid => fid !== id));
+    } else {
+      setFavorites(prev => [...prev, id]);
+    }
+  };
+
+  const handleChannelClick = (channel: Channel) => {
+    setSelectedChannel(channel);
+    // Add to recents (unique, max 5, unshift)
+    setRecents(prev => {
+      const filtered = prev.filter(c => c.id !== channel.id);
+      return [channel, ...filtered].slice(0, 5);
+    });
+  };
+
+  const filteredChannels = useMemo(() => {
+    if (!playlist?.info) return [];
+    return playlist.info.filter(ch => {
+      const matchesSearch =
+        ch.name.toLowerCase().includes(search.toLowerCase()) ||
+        ch.tagline?.toLowerCase().includes(search.toLowerCase());
+      return matchesSearch;
+    });
+  }, [playlist, search]);
+
+  const favoriteChannels = useMemo(() => {
+    if (!playlist?.info) return [];
+    return playlist.info.filter(ch => favorites.includes(ch.id));
+  }, [playlist, favorites]);
+
+  // ... (skipping some lines)
+
+  if (loading) {
+    return (
+      <div className="flex flex-col items-center justify-center min-h-screen space-y-4">
+        <div className="w-12 h-12 border-4 border-primary border-t-transparent rounded-full animate-spin"></div>
+        <p className="text-gray-400 animate-pulse font-medium">Decrypting Secure Playlist... (This may take ~10s)</p>
+      </div>
+    );
+  }
+
   return (
-    <div className="flex min-h-screen items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex min-h-screen w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
-        />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the page.tsx file.
-          </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
-          </p>
+    <main className="min-h-screen p-4 md:p-8 max-w-7xl mx-auto pb-32">
+      {/* Header Section */}
+      <header className="mb-12 text-center space-y-4">
+        <motion.div
+          initial={{ opacity: 0, y: -20 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="inline-flex items-center space-x-2 px-4 py-1.5 rounded-full glass border border-primary/20"
+        >
+          <Globe className="w-4 h-4 text-primary" />
+          <span className="text-xs font-semibold tracking-widest uppercase text-primary">Live Streaming Platform</span>
+        </motion.div>
+
+        <motion.h1
+          initial={{ opacity: 0, scale: 0.9 }}
+          animate={{ opacity: 1, scale: 1 }}
+          className="text-4xl md:text-6xl font-black tracking-tight"
+        >
+          Bit<span className="gradient-text">TV</span> Web
+        </motion.h1>
+
+        {/* Search Bar */}
+        <div className="max-w-2xl mx-auto mt-8 relative group z-10">
+          <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-400 group-focus-within:text-primary transition-colors" />
+          <input
+            type="text"
+            placeholder="Search channels..."
+            className="w-full bg-surface/50 border border-white/5 rounded-2xl py-4 pl-12 pr-4 focus:outline-none focus:ring-2 focus:ring-primary/50 transition-all backdrop-blur-xl"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+          />
         </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={16}
+      </header>
+
+      {/* Recents Section */}
+      {recents.length > 0 && (
+        <section className="mb-8">
+          <div className="flex items-center space-x-2 mb-4 px-2">
+            <History className="w-4 h-4 text-primary" />
+            <h2 className="text-sm font-bold uppercase tracking-wider text-gray-400">Recently Watched</h2>
+          </div>
+          <div className="flex space-x-4 overflow-x-auto pb-4 scrollbar-hide">
+            {recents.map(ch => (
+              <div
+                key={ch.id}
+                onClick={() => handleChannelClick(ch)}
+                className="glass-card p-3 rounded-xl min-w-[200px] cursor-pointer hover:bg-white/5 flex items-center space-x-3 transition-colors"
+              >
+                <div className="p-2 bg-primary/20 rounded-lg">
+                  <Play className="w-4 h-4 text-primary fill-current" />
+                </div>
+                <div>
+                  <p className="font-bold text-sm truncate">{ch.name}</p>
+                  <p className="text-[10px] text-gray-500">Resume Playback</p>
+                </div>
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
+
+
+      {/* Favorites Section */}
+      {favoriteChannels.length > 0 && !search && (
+        <section className="mb-8">
+          <div className="flex items-center space-x-2 mb-4 px-2">
+            <Heart className="w-4 h-4 text-accent fill-accent" />
+            <h2 className="text-sm font-bold uppercase tracking-wider text-gray-400">Your Favorites</h2>
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+            {favoriteChannels.map(ch => (
+              <ChannelCard
+                key={ch.id}
+                channel={ch}
+                isFav={true}
+                onToggleFav={(e) => toggleFavorite(e, ch.id)}
+                onClick={() => handleChannelClick(ch)}
+              />
+            ))}
+          </div>
+        </section>
+      )}
+
+
+      {/* Main Grid */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-5 gap-4">
+        <AnimatePresence>
+          {filteredChannels.map((channel, idx) => (
+            <ChannelCard
+              key={channel.id + "main"}
+              channel={channel}
+              isFav={favorites.includes(channel.id)}
+              onToggleFav={(e) => toggleFavorite(e, channel.id)}
+              onClick={() => handleChannelClick(channel)}
+              index={idx}
             />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Documentation
-          </a>
+          ))}
+        </AnimatePresence>
+      </div>
+
+      {filteredChannels.length === 0 && (
+        <div className="text-center py-20 opacity-50">
+          <Filter className="w-12 h-12 mx-auto mb-4 text-gray-600" />
+          <p>No channels found for "{search}"</p>
         </div>
-      </main>
-    </div>
+      )}
+
+      {/* Video Player Modal */}
+      {selectedChannel && (
+        <Player
+          url={selectedChannel.hls}
+          title={selectedChannel.name}
+          headers={selectedChannel.header_iptv ? JSON.parse(selectedChannel.header_iptv) : undefined}
+          license={selectedChannel.url_license}
+          licenseHeader={selectedChannel.header_license}
+          type={selectedChannel.jenis}
+          onClose={() => setSelectedChannel(null)}
+        />
+      )}
+    </main>
+  );
+}
+
+// Extracted Card Component for Reusability
+function ChannelCard({ channel, isFav, onToggleFav, onClick, index = 0 }: {
+  channel: Channel;
+  isFav: boolean;
+  onToggleFav: (e: React.MouseEvent) => void;
+  onClick: () => void;
+  index?: number;
+}) {
+
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: 20 }}
+      animate={{ opacity: 1, y: 0 }}
+      exit={{ opacity: 0, scale: 0.9 }}
+      transition={{ delay: Math.min(index * 0.02, 0.5) }} // Cap delay for large lists
+      onClick={onClick}
+      className="group cursor-pointer h-full"
+    >
+      <div className="glass-card p-4 rounded-[2rem] h-full flex flex-col shimmer relative transition-transform hover:-translate-y-2">
+
+        {/* Favorite Button */}
+        <button
+          onClick={onToggleFav}
+          className="absolute top-4 right-4 z-20 p-2.5 rounded-full glass hover:bg-white/10 transition-colors"
+        >
+          <Heart className={clsx("w-4 h-4 transition-colors", isFav ? "fill-accent text-accent" : "text-gray-500")} />
+        </button>
+
+        <div className="space-y-4">
+          {/* Large Logo Container (3x increase) */}
+          <div className="w-full h-32 rounded-2xl bg-white/5 p-4 flex items-center justify-center overflow-hidden group-hover:bg-primary/10 transition-colors relative">
+            {channel.image ? (
+              <img
+                src={channel.image}
+                alt={channel.name}
+                className="w-full h-full object-contain drop-shadow-2xl transition-transform duration-500 group-hover:scale-110"
+                onError={(e) => {
+                  (e.target as HTMLImageElement).style.display = 'none';
+                  (e.target as HTMLImageElement).parentElement?.classList.add('fallback-icon');
+                }}
+              />
+            ) : (
+              <Tv2 className="w-12 h-12 text-gray-600 group-hover:text-primary transition-colors" />
+            )}
+            <Tv2 className="w-12 h-12 text-gray-600 group-hover:text-primary transition-colors hidden fallback-show" />
+          </div>
+
+          <div className="px-1">
+            <h3 className="font-bold text-lg leading-tight group-hover:text-primary transition-colors line-clamp-1">
+              {channel.name}
+            </h3>
+            <p className="text-gray-500 text-xs mt-1.5 line-clamp-2 min-h-[3rem]">
+              {channel.tagline || channel.namespace || "Premium Stream"}
+            </p>
+          </div>
+        </div>
+
+        <div className="mt-auto pt-4 flex items-center justify-between">
+          <span className="text-[10px] text-gray-600 font-bold uppercase tracking-[0.2em]">
+            CH {channel.id}
+          </span>
+          <div className="flex items-center space-x-2 bg-primary/10 px-3 py-1.5 rounded-full text-primary text-[10px] font-black uppercase tracking-widest group-hover:bg-primary group-hover:text-white transition-all">
+            <span>Watch</span>
+            <Play className="w-3 h-3 fill-current" />
+          </div>
+        </div>
+      </div>
+    </motion.div>
   );
 }
