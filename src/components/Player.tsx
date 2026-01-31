@@ -86,7 +86,7 @@ export default function Player({ url, title, onClose, headers, license, licenseH
             mutex: true,
             backdrop: true,
             playsInline: true,
-            autoPlayback: true,
+            autoPlayback: false,
             airplay: true,
             theme: '#6366f1',
             loading: false, 
@@ -159,15 +159,21 @@ export default function Player({ url, title, onClose, headers, license, licenseH
         } as any);
 
         let hasStartedPlaying = false;
-        art.loading.show = false;
+        art.loading.show = false; // Force hide initially
 
         art.on('play', () => {
+            // Only allow spinner after playback has actually started
             hasStartedPlaying = true;
-            art.loading.show = true;
         });
 
         art.on('video:waiting', () => {
+            // Aggressively hide spinner if not yet playing
             if (!hasStartedPlaying) art.loading.show = false;
+        });
+
+        art.on('video:playing', () => {
+            // Ensure spinner is hidden once playing
+            art.loading.show = false;
         });
 
         return () => {
