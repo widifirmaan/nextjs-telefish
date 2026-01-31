@@ -89,7 +89,7 @@ export default function Player({ url, title, onClose, headers, license, licenseH
             autoPlayback: true,
             airplay: true,
             theme: '#6366f1',
-            loading: false, // Don't show spinner initially
+            loading: false, 
             type: url.includes('.mpd') ? 'mpd' : 'm3u8',
             customType: {
                 m3u8: function (video: HTMLMediaElement, url: string) {
@@ -111,135 +111,63 @@ export default function Player({ url, title, onClose, headers, license, licenseH
                     }
                 },
                 mpd: async function (video: HTMLMediaElement, url: string) {
-                    // Use Shaka Player for MPD - better ClearKey DRM support
                     const shaka = await import('shaka-player') as any;
-                    
-                    // Install polyfills
                     shaka.polyfill.installAll();
-                    
-                    if (!shaka.Player.isBrowserSupported()) {
-                        console.error('[Shaka] Browser not supported');
-                        return;
-                    }
-                    
-                    // Reset any existing Shaka player
-                    if ((window as any).__shakaPlayer) {
-                        await (window as any).__shakaPlayer.destroy();
-                    }
-                    
+                    if (!shaka.Player.isBrowserSupported()) return;
+                    if ((window as any).__shakaPlayer) await (window as any).__shakaPlayer.destroy();
                     const player = new shaka.Player();
                     await player.attach(video);
                     (window as any).__shakaPlayer = player;
-                    
-                    // Use the PROXIED URL for the manifest
                     const drmType = type?.includes('clearkey') ? 'clearkey' : undefined;
                     const proxiedManifestUrl = getProxyUrl(url, drmType);
-                    
-                    // Configure network request interception to proxy all external requests
                     player.getNetworkingEngine()?.registerRequestFilter((type: any, request: any) => {
                         if (request.uris && request.uris.length > 0) {
                             const uri = request.uris[0];
-                            if (uri.startsWith('http') && 
-                                !uri.includes(window.location.host) && 
-                                !uri.includes('/api/playlist/proxy')) {
-                                console.log('[Shaka] Proxying request:', uri);
+                            if (uri.startsWith('http') && !uri.includes(window.location.host) && !uri.includes('/api/playlist/proxy')) {
                                 request.uris[0] = getProxyUrl(uri);
                             }
                         }
                     });
-                    
-                    // ClearKey DRM Configuration
                     if (license && type === 'dash-clearkey') {
                         try {
-                            // Helper to convert base64 to hex
                             const base64ToHex = (base64: string) => {
                                 let normalized = base64.replace(/-/g, '+').replace(/_/g, '/');
                                 while (normalized.length % 4 !== 0) normalized += '=';
                                 const binary = atob(normalized);
                                 let hex = '';
-                                for (let i = 0; i < binary.length; i++) {
-                                    hex += binary.charCodeAt(i).toString(16).padStart(2, '0');
-                                }
+                                for (let i = 0; i < binary.length; i++) hex += binary.charCodeAt(i).toString(16).padStart(2, '0');
                                 return hex;
                             };
-                            
                             const normalizedLicense = license.replace(/-/g, '+').replace(/_/g, '/');
                             const paddedLicense = normalizedLicense.length % 4 === 0 ? normalizedLicense : normalizedLicense + '='.repeat(4 - (normalizedLicense.length % 4));
-                            const jsonStr = atob(paddedLicense);
-                            const licenseData = JSON.parse(jsonStr);
-                            
+                            const licenseData = JSON.parse(atob(paddedLicense));
                             if (licenseData.keys) {
-                                // Build Shaka ClearKey configuration
-                                // Shaka expects keys in hex format: { keyId: key }
                                 const clearKeys: { [keyId: string]: string } = {};
                                 licenseData.keys.forEach((k: any) => {
-                                    const kidHex = base64ToHex(k.kid);
-                                    const keyHex = base64ToHex(k.k);
-                                    clearKeys[kidHex] = keyHex;
-                                    console.log(`[Shaka ClearKey] Registered: KID=${kidHex}, Key=${keyHex}`);
+                                    clearKeys[base64ToHex(k.kid)] = base64ToHex(k.k);
                                 });
-                                
-                                player.configure({
-                                    drm: {
-                                        clearKeys: clearKeys
-                                    }
-                                });
-                                
-                                console.log('[Shaka] ClearKey configured:', clearKeys);
+                                player.configure({ drm: { clearKeys: clearKeys } });
                             }
-                        } catch (e) {
-                            console.error('[Shaka] Failed to configure ClearKey:', e);
-                        }
+                        } catch (e) {}
                     }
-                    
-                    // Widevine DRM Configuration
                     if (license && type !== 'dash-clearkey' && license.startsWith('http')) {
-                        const drmConfig: any = {
-                            drm: {
-                                servers: {
-                                    'com.widevine.alpha': license
-                                }
-                            }
-                        };
-                        
-                        // Add license request headers if available
-                        if (licenseHeader) {
-                            try {
-                                const parsedHeaders = JSON.parse(licenseHeader);
-                                player.getNetworkingEngine()?.registerRequestFilter((reqType: any, request: any) => {
-                                    if (reqType === shaka.net.NetworkingEngine.RequestType.LICENSE) {
-                                        Object.assign(request.headers, parsedHeaders);
-                                    }
-                                });
-                            } catch (e) {
-                                console.warn('[Shaka] Failed to parse licenseHeader');
-                            }
-                        }
-                        
-                        player.configure(drmConfig);
-                        console.log('[Shaka] Widevine configured:', license);
+                        player.configure({ drm: { servers: { 'com.widevine.alpha': license } } });
                     }
-                    
-                    // Error handling
-                    player.addEventListener('error', (event: any) => {
-                        console.error('[Shaka Error]:', event.detail);
-                    });
-                    
-                    // Load the manifest
-                    try {
-                        console.log('[Shaka] Loading manifest:', proxiedManifestUrl);
-                        await player.load(proxiedManifestUrl);
-                        console.log('[Shaka] Manifest loaded successfully');
-                    } catch (e: any) {
-                        console.error('[Shaka] Failed to load manifest:', e);
-                    }
+                    try { await player.load(proxiedManifestUrl); } catch (e) {}
                 },
             },
         } as any);
-        
-        // Only show loading spinner once the user has started playback
+
+        let hasStartedPlaying = false;
+        art.loading.show = false;
+
         art.on('play', () => {
+            hasStartedPlaying = true;
             art.loading.show = true;
+        });
+
+        art.on('video:waiting', () => {
+            if (!hasStartedPlaying) art.loading.show = false;
         });
 
         return () => {
