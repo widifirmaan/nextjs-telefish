@@ -16,6 +16,7 @@ interface PlayerProps {
 
 export default function Player({ url, title, onClose, headers, license, licenseHeader, type }: PlayerProps) {
     const artRef = useRef<HTMLDivElement>(null);
+    const ttmlRef = useRef<HTMLDivElement>(null);
 
     // Construct Proxy URL with headers
     const getProxyUrl = (targetUrl: string, drm?: string) => {
@@ -109,34 +110,44 @@ export default function Player({ url, title, onClose, headers, license, licenseH
                     }
                 },
                 mpd: async function (video: HTMLMediaElement, url: string) {
-                    const dashjs = await import('dashjs');
-                    if (dashRef.current) dashRef.current.reset();
-
-                    const player = dashjs.MediaPlayer().create();
-
-                    // Use the PROXIED URL for the manifest.
-                    // Pass drm=clearkey if it's a clearkey playback
+                    // Use Shaka Player for MPD - better ClearKey DRM support
+                    const shaka = await import('shaka-player');
+                    
+                    // Install polyfills
+                    shaka.polyfill.installAll();
+                    
+                    if (!shaka.Player.isBrowserSupported()) {
+                        console.error('[Shaka] Browser not supported');
+                        return;
+                    }
+                    
+                    // Reset any existing Shaka player
+                    if ((window as any).__shakaPlayer) {
+                        await (window as any).__shakaPlayer.destroy();
+                    }
+                    
+                    const player = new shaka.Player();
+                    await player.attach(video);
+                    (window as any).__shakaPlayer = player;
+                    
+                    // Use the PROXIED URL for the manifest
                     const drmType = type?.includes('clearkey') ? 'clearkey' : undefined;
                     const proxiedManifestUrl = getProxyUrl(url, drmType);
-
-                    // Global XHR Hook - The "Nuclear Option" to solve CORS for all dash.js internal loaders
-                    const originalOpen = XMLHttpRequest.prototype.open;
-                    XMLHttpRequest.prototype.open = function(method: string, requestUrl: string | URL) {
-                        let finalUrl = typeof requestUrl === 'string' ? requestUrl : requestUrl.toString();
-                        
-                        // If it is an external URL, re-route it through our proxy
-                        if (finalUrl && finalUrl.startsWith('http') && !finalUrl.includes(window.location.host)) {
-                            console.log("[DRM Global Hook] Proxying:", finalUrl);
-                            finalUrl = getProxyUrl(finalUrl);
+                    
+                    // Configure network request interception to proxy all external requests
+                    player.getNetworkingEngine()?.registerRequestFilter((type: any, request: any) => {
+                        if (request.uris && request.uris.length > 0) {
+                            const uri = request.uris[0];
+                            if (uri.startsWith('http') && 
+                                !uri.includes(window.location.host) && 
+                                !uri.includes('/api/playlist/proxy')) {
+                                console.log('[Shaka] Proxying request:', uri);
+                                request.uris[0] = getProxyUrl(uri);
+                            }
                         }
-                        
-                        return originalOpen.apply(this, [method, finalUrl, ...Array.from(arguments).slice(2)] as any);
-                    };
-
-                    // DRM Protection Data
-                    const protectionData: any = {};
-
-                    // ClearKey
+                    });
+                    
+                    // ClearKey DRM Configuration
                     if (license && type === 'dash-clearkey') {
                         try {
                             // Helper to convert base64 to hex
@@ -150,82 +161,83 @@ export default function Player({ url, title, onClose, headers, license, licenseH
                                 }
                                 return hex;
                             };
-
-                            // Helper to convert base64 to base64url (some browsers prefer this for clearkeys)
-                            const base64ToBase64Url = (base64: string) => {
-                                return base64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-                            };
-
+                            
                             const normalizedLicense = license.replace(/-/g, '+').replace(/_/g, '/');
                             const paddedLicense = normalizedLicense.length % 4 === 0 ? normalizedLicense : normalizedLicense + '='.repeat(4 - (normalizedLicense.length % 4));
                             const jsonStr = atob(paddedLicense);
                             const licenseData = JSON.parse(jsonStr);
-
+                            
                             if (licenseData.keys) {
-                                const clearkeys: Record<string, string> = {};
+                                // Build Shaka ClearKey configuration
+                                // Shaka expects keys in hex format: { keyId: key }
+                                const clearKeys: { [keyId: string]: string } = {};
                                 licenseData.keys.forEach((k: any) => {
                                     const kidHex = base64ToHex(k.kid);
                                     const keyHex = base64ToHex(k.k);
-                                    
-                                    // dash.js compatibility: provide multiple HEX variants
-                                    clearkeys[kidHex.toLowerCase()] = keyHex.toLowerCase();
-                                    clearkeys[kidHex.toUpperCase()] = keyHex.toLowerCase();
-                                    
-                                    // Provide dashed version if it's 32 chars (UUID)
-                                    if (kidHex.length === 32) {
-                                        const dashed = `${kidHex.substring(0,8)}-${kidHex.substring(8,12)}-${kidHex.substring(12,16)}-${kidHex.substring(16,20)}-${kidHex.substring(20)}`;
-                                        clearkeys[dashed.toLowerCase()] = keyHex.toLowerCase();
-                                        clearkeys[dashed.toUpperCase()] = keyHex.toLowerCase();
-                                    }
-                                    
-                                    // Provide Base64URL
-                                    const kidB64Url = base64ToBase64Url(k.kid);
-                                    const keyB64Url = base64ToBase64Url(k.k);
-                                    clearkeys[kidB64Url] = keyB64Url;
+                                    clearKeys[kidHex] = keyHex;
+                                    console.log(`[Shaka ClearKey] Registered: KID=${kidHex}, Key=${keyHex}`);
                                 });
                                 
-                                protectionData["org.w3.clearkey"] = { 
-                                    "clearkeys": clearkeys,
-                                    "priority": 1 // High priority for dash.js 5+
-                                };
-                                console.log("[DRM] ClearKey configured with exhaustive formats for", licenseData.keys.length, "keys");
+                                player.configure({
+                                    drm: {
+                                        clearKeys: clearKeys
+                                    }
+                                });
+                                
+                                console.log('[Shaka] ClearKey configured:', clearKeys);
                             }
                         } catch (e) {
-                            console.error("Failed to parse ClearKey license", e);
+                            console.error('[Shaka] Failed to configure ClearKey:', e);
                         }
                     }
-
-                    // Widevine / License Headers
-                    if (licenseHeader) {
-                        try {
-                            const parsedHeader = JSON.parse(licenseHeader);
-                            if (parsedHeader.widevine) {
-                                protectionData["com.widevine.alpha"] = {
-                                    serverURL: parsedHeader.widevine,
-                                    priority: 5 // Lower priority than ClearKey
-                                };
-
-                                // Add extra headers if specified (e.g. from header_license in playlist)
-                                if (headers) {
-                                    protectionData["com.widevine.alpha"].httpRequestHeaders = headers;
+                    
+                    // Widevine DRM Configuration
+                    if (license && type !== 'dash-clearkey' && license.startsWith('http')) {
+                        const drmConfig: any = {
+                            drm: {
+                                servers: {
+                                    'com.widevine.alpha': license
                                 }
                             }
-                        } catch (e) {
-                            // licenseHeader might not be JSON sometimes? 
-                            // In some cases it might be a direct URL, but based on encrypted_playlist.json it's JSON.
+                        };
+                        
+                        // Add license request headers if available
+                        if (licenseHeader) {
+                            try {
+                                const parsedHeaders = JSON.parse(licenseHeader);
+                                player.getNetworkingEngine()?.registerRequestFilter((reqType: any, request: any) => {
+                                    if (reqType === shaka.net.NetworkingEngine.RequestType.LICENSE) {
+                                        Object.assign(request.headers, parsedHeaders);
+                                    }
+                                });
+                            } catch (e) {
+                                console.warn('[Shaka] Failed to parse licenseHeader');
+                            }
                         }
+                        
+                        player.configure(drmConfig);
+                        console.log('[Shaka] Widevine configured:', license);
                     }
-
-                    if (Object.keys(protectionData).length > 0) {
-                        player.setProtectionData(protectionData);
-                    }
-
-                    player.initialize(video, proxiedManifestUrl, true);
-                    dashRef.current = player;
                     
-                    // Store original open on the player object for cleanup
-                    (player as any)._originalXhrOpen = originalOpen;
-                }
+                    // Error handling
+                    player.addEventListener('error', (event: any) => {
+                        console.error('[Shaka Error]:', event.detail);
+                    });
+                    
+                    // Load the manifest
+                    try {
+                        console.log('[Shaka] Loading manifest:', proxiedManifestUrl);
+                        await player.load(proxiedManifestUrl);
+                        console.log('[Shaka] Manifest loaded successfully');
+                        
+                        // Autoplay
+                        video.play().catch(e => {
+                            console.warn('[Shaka] Autoplay blocked:', e);
+                        });
+                    } catch (e: any) {
+                        console.error('[Shaka] Failed to load manifest:', e);
+                    }
+                },
             },
         } as any);
 
@@ -235,10 +247,6 @@ export default function Player({ url, title, onClose, headers, license, licenseH
                 hlsRef.current = null;
             }
             if (dashRef.current) {
-                // Restore XHR if it was patched
-                if ((dashRef.current as any)._originalXhrOpen) {
-                    XMLHttpRequest.prototype.open = (dashRef.current as any)._originalXhrOpen;
-                }
                 dashRef.current.reset();
                 dashRef.current = null;
             }
@@ -252,6 +260,7 @@ export default function Player({ url, title, onClose, headers, license, licenseH
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/90 backdrop-blur-md p-4 md:p-10">
             <div className="relative w-full max-w-5xl aspect-video glass-card overflow-hidden rounded-2xl">
                 <div ref={artRef} className="w-full h-full" />
+                <div ref={ttmlRef} className="absolute inset-0 pointer-events-none z-10" />
                 <button
                     onClick={onClose}
                     className="absolute top-4 right-4 z-50 p-2 bg-black/50 hover:bg-accent text-white rounded-full transition-colors"
