@@ -32,10 +32,11 @@ export async function GET(request: NextRequest) {
 
         const newHeaders = new Headers(response.headers);
         newHeaders.delete('content-encoding');
-        newHeaders.delete('content-length');
+        
         newHeaders.set('Access-Control-Allow-Origin', '*');
         newHeaders.set('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
         newHeaders.set('Access-Control-Allow-Headers', 'Content-Type, Range, User-Agent, X-Requested-With');
+        newHeaders.set('Access-Control-Expose-Headers', 'Content-Length, Content-Range, Accept-Ranges');
 
         const contentType = newHeaders.get('content-type') || '';
         const isM3u8 = contentType.includes('application/vnd.apple.mpegurl') ||
@@ -47,6 +48,9 @@ export async function GET(request: NextRequest) {
 
         if (isM3u8 || isMpd) {
             try {
+                // Since we are modifying the manifest text, the original Content-Length is invalid
+                newHeaders.delete('content-length');
+                
                 let text = await response.text();
                 const drm = searchParams.get('drm');
                 const baseUrl = targetUrl.substring(0, targetUrl.lastIndexOf('/') + 1);
