@@ -111,7 +111,7 @@ export default function Player({ url, title, onClose, headers, license, licenseH
                 },
                 mpd: async function (video: HTMLMediaElement, url: string) {
                     // Use Shaka Player for MPD - better ClearKey DRM support
-                    const shaka = await import('shaka-player');
+                    const shaka = await import('shaka-player') as any;
                     
                     // Install polyfills
                     shaka.polyfill.installAll();
