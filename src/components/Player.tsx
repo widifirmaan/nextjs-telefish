@@ -225,15 +225,9 @@ export default function Player({ url, title, onClose, headers, license, licenseH
                     });
                     
                     // Load the manifest
-                    try {
                         console.log('[Shaka] Loading manifest:', proxiedManifestUrl);
                         await player.load(proxiedManifestUrl);
                         console.log('[Shaka] Manifest loaded successfully');
-                        
-                        // Autoplay
-                        video.play().catch(e => {
-                            console.warn('[Shaka] Autoplay blocked:', e);
-                        });
                     } catch (e: any) {
                         console.error('[Shaka] Failed to load manifest:', e);
                     }

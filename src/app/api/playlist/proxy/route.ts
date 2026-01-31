@@ -13,6 +13,15 @@ export async function GET(request: NextRequest) {
         return new NextResponse("Missing url parameter", { status: 400 });
     }
 
+    // Handle relative segments appended to the proxy URL
+    // Safari might try requesting /api/playlist/proxy?url=BASE_URL&referer=.../segment.ts
+    // or it might just append /segment.ts to the end of the query string.
+    let finalUrl = targetUrl;
+    const pathExtra = searchParams.get('path');
+    if (pathExtra) {
+        finalUrl = new URL(pathExtra, targetUrl).toString();
+    }
+
     try {
         const headers: Record<string, string> = {
             'User-Agent': userAgent,
@@ -26,7 +35,7 @@ export async function GET(request: NextRequest) {
         const incomingAccept = request.headers.get('accept');
         if (incomingAccept) headers['Accept'] = incomingAccept;
 
-        const response = await fetch(targetUrl, {
+        const response = await fetch(finalUrl, {
             headers: headers,
         });
 
@@ -59,8 +68,19 @@ export async function GET(request: NextRequest) {
                     text = text.split('\n').map(line => {
                         const trimmed = line.trim();
                         if (!trimmed || trimmed.startsWith('#')) return line;
-                        if (trimmed.startsWith('http')) return trimmed;
-                        try { return new URL(trimmed, baseUrl).toString(); } catch (e) { return trimmed; }
+                        
+                        let segmentUrl = trimmed;
+                        try { segmentUrl = new URL(trimmed, baseUrl).toString(); } catch (e) { return trimmed; }
+                        
+                        // Proxy the segment URL
+                        const proxiedLink = new URL('/api/playlist/proxy', request.url);
+                        proxiedLink.searchParams.set('url', segmentUrl);
+                        proxiedLink.searchParams.set('referer', referer);
+                        proxiedLink.searchParams.set('origin', origin);
+                        proxiedLink.searchParams.set('user_agent', userAgent);
+                        if (drm) proxiedLink.searchParams.set('drm', drm);
+                        
+                        return proxiedLink.toString();
                     }).join('\n');
                 } else if (isMpd) {
                     // For MPD, we need to rewrite BaseURL to go through our proxy
@@ -72,9 +92,20 @@ export async function GET(request: NextRequest) {
                         if (mpdMatch) {
                             const mpdTag = mpdMatch[0];
                             const idx = text.indexOf(mpdTag);
-                            text = text.slice(0, idx + mpdTag.length) + `\n  <BaseURL>${baseUrl}</BaseURL>` + text.slice(idx + mpdTag.length);
+                            
+                            // For MPD BaseURL, we point it to the proxy
+                            const proxiedBase = new URL('/api/playlist/proxy', request.url);
+                            proxiedBase.searchParams.set('url', baseUrl);
+                            proxiedBase.searchParams.set('referer', referer);
+                            proxiedBase.searchParams.set('origin', origin);
+                            proxiedBase.searchParams.set('user_agent', userAgent);
+                            if (drm) proxiedBase.searchParams.set('drm', drm);
+                            
+                            text = text.slice(0, idx + mpdTag.length) + `\n  <BaseURL>${proxiedBase.toString()}&amp;path=</BaseURL>` + text.slice(idx + mpdTag.length);
                         }
                     } else {
+                        // If BaseURL exists, we leave it for now or could wrap it. 
+                        // Most Duktek MPDs don't have it, so injecting it is usually enough.
                         text = text.replace(/<BaseURL>(.*?)<\/BaseURL>/g, (m, c) => c.trim().startsWith('http') ? m : `<BaseURL>${baseUrl}${c.trim()}</BaseURL>`);
                     }
 
