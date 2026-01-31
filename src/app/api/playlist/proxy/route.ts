@@ -101,12 +101,26 @@ export async function GET(request: NextRequest) {
                             proxiedBase.searchParams.set('user_agent', userAgent);
                             if (drm) proxiedBase.searchParams.set('drm', drm);
                             
-                            text = text.slice(0, idx + mpdTag.length) + `\n  <BaseURL>${proxiedBase.toString()}&amp;path=</BaseURL>` + text.slice(idx + mpdTag.length);
+                            // XML Escaping: & -> &amp;
+                            const escapedBase = proxiedBase.toString().replace(/&/g, '&amp;');
+                            
+                            text = text.slice(0, idx + mpdTag.length) + `\n  <BaseURL>${escapedBase}&amp;path=</BaseURL>` + text.slice(idx + mpdTag.length);
                         }
                     } else {
-                        // If BaseURL exists, we leave it for now or could wrap it. 
-                        // Most Duktek MPDs don't have it, so injecting it is usually enough.
-                        text = text.replace(/<BaseURL>(.*?)<\/BaseURL>/g, (m, c) => c.trim().startsWith('http') ? m : `<BaseURL>${baseUrl}${c.trim()}</BaseURL>`);
+                        // If BaseURL exists, rewrite it to go through the proxy too
+                        text = text.replace(/<BaseURL>(.*?)<\/BaseURL>/g, (m, c) => {
+                            const content = c.trim();
+                            const segmentUrl = content.startsWith('http') ? content : new URL(content, baseUrl).toString();
+                            
+                            const p = new URL('/api/playlist/proxy', request.url);
+                            p.searchParams.set('url', segmentUrl);
+                            p.searchParams.set('referer', referer);
+                            p.searchParams.set('origin', origin);
+                            p.searchParams.set('user_agent', userAgent);
+                            if (drm) p.searchParams.set('drm', drm);
+                            
+                            return `<BaseURL>${p.toString().replace(/&/g, '&amp;')}</BaseURL>`;
+                        });
                     }
 
                     if (drm === 'clearkey') {

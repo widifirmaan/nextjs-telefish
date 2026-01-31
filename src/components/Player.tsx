@@ -138,9 +138,12 @@ export default function Player({ url, title, onClose, headers, license, licenseH
                     player.getNetworkingEngine()?.registerRequestFilter((type: any, request: any) => {
                         if (request.uris && request.uris.length > 0) {
                             const uri = request.uris[0];
-                            if (uri.startsWith('http') && 
-                                !uri.includes(window.location.host) && 
-                                !uri.includes('/api/playlist/proxy')) {
+                            // Proxy if it's external OR if it's a relative/local path that isn't already the proxy
+                            const isAlreadyProxied = uri.includes('/api/playlist/proxy');
+                            const isExternal = uri.startsWith('http') && !uri.includes(window.location.host);
+                            const isMisresolvedLocal = !isAlreadyProxied && (uri.startsWith('/') || !uri.startsWith('http'));
+
+                            if (!isAlreadyProxied && (isExternal || isMisresolvedLocal)) {
                                 console.log('[Shaka] Proxying request:', uri);
                                 request.uris[0] = getProxyUrl(uri);
                             }
