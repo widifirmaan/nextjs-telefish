@@ -89,6 +89,7 @@ export default function Player({ url, title, onClose, headers, license, licenseH
             autoPlayback: true,
             airplay: true,
             theme: '#6366f1',
+            loading: false, // Don't show spinner initially
             type: url.includes('.mpd') ? 'mpd' : 'm3u8',
             customType: {
                 m3u8: function (video: HTMLMediaElement, url: string) {
@@ -235,6 +236,11 @@ export default function Player({ url, title, onClose, headers, license, licenseH
                 },
             },
         } as any);
+        
+        // Only show loading spinner once the user has started playback
+        art.on('play', () => {
+            art.loading.show = true;
+        });
 
         return () => {
             if (hlsRef.current) {
