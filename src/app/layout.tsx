@@ -13,7 +13,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "BitTV Web",
+  title: "Telefish Kere",
   description: "Experience premium Indonesian and International channels in high resolution.",
 };
 

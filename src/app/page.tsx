@@ -142,7 +142,7 @@ export default function Home() {
           animate={{ opacity: 1, scale: 1 }}
           className="text-4xl md:text-6xl font-black tracking-tight"
         >
-          Bit<span className="gradient-text">TV</span> Web
+          Telefish <span className="gradient-text">Kere</span>
         </motion.h1>
 
         {/* Search Bar */}
@@ -209,7 +209,7 @@ export default function Home() {
 
 
       {/* Main Grid */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-5 gap-4">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         <AnimatePresence>
           {filteredChannels.map((channel, idx) => (
             <ChannelCard
