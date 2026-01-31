@@ -2,7 +2,11 @@ import { NextRequest, NextResponse } from 'next/server';
 
 export const dynamic = 'force-dynamic';
 
-export async function GET(request: NextRequest) {
+export async function GET(
+    request: NextRequest,
+    { params }: { params: Promise<{ path?: string[] }> }
+) {
+    const { path } = await params;
     const searchParams = request.nextUrl.searchParams;
     const targetUrl = searchParams.get('url');
     const referer = searchParams.get('referer') || 'https://duktek.id/';
@@ -14,12 +18,17 @@ export async function GET(request: NextRequest) {
     }
 
     // Handle relative segments appended to the proxy URL
-    // Safari might try requesting /api/playlist/proxy?url=BASE_URL&referer=.../segment.ts
-    // or it might just append /segment.ts to the end of the query string.
+    // If we have a 'path' from the catch-all route, resolve it against targetUrl
     let finalUrl = targetUrl;
-    const pathExtra = searchParams.get('path');
-    if (pathExtra) {
-        finalUrl = new URL(pathExtra, targetUrl).toString();
+    if (path && path.length > 0) {
+        const pathExtra = path.join('/');
+        try {
+            // If targetUrl ends with something that isn't a directory, we should probably use its base
+            const baseDir = targetUrl.endsWith('/') ? targetUrl : targetUrl.substring(0, targetUrl.lastIndexOf('/') + 1);
+            finalUrl = new URL(pathExtra, baseDir).toString();
+        } catch (e) {
+            console.warn("[Proxy] URL resolution failed for path:", pathExtra, "relative to:", targetUrl);
+        }
     }
 
     try {
@@ -72,9 +81,9 @@ export async function GET(request: NextRequest) {
                         let segmentUrl = trimmed;
                         try { segmentUrl = new URL(trimmed, baseUrl).toString(); } catch (e) { return trimmed; }
                         
-                        // Proxy the segment URL
-                        const proxiedLink = new URL('/api/playlist/proxy', request.url);
-                        proxiedLink.searchParams.set('url', segmentUrl);
+                        // Proxy the segment URL - use the same directory structure to aid relative resolution
+                        const proxiedLink = new URL(`/api/playlist/proxy/${trimmed}`, request.url);
+                        proxiedLink.searchParams.set('url', targetUrl); // Keep the base manifest URL for context
                         proxiedLink.searchParams.set('referer', referer);
                         proxiedLink.searchParams.set('origin', origin);
                         proxiedLink.searchParams.set('user_agent', userAgent);
@@ -93,8 +102,8 @@ export async function GET(request: NextRequest) {
                             const mpdTag = mpdMatch[0];
                             const idx = text.indexOf(mpdTag);
                             
-                            // For MPD BaseURL, we point it to the proxy
-                            const proxiedBase = new URL('/api/playlist/proxy', request.url);
+                            // For MPD BaseURL, we point it to the proxy directory
+                            const proxiedBase = new URL('/api/playlist/proxy/segments/', request.url);
                             proxiedBase.searchParams.set('url', baseUrl);
                             proxiedBase.searchParams.set('referer', referer);
                             proxiedBase.searchParams.set('origin', origin);
@@ -104,7 +113,7 @@ export async function GET(request: NextRequest) {
                             // XML Escaping: & -> &amp;
                             const escapedBase = proxiedBase.toString().replace(/&/g, '&amp;');
                             
-                            text = text.slice(0, idx + mpdTag.length) + `\n  <BaseURL>${escapedBase}&amp;path=</BaseURL>` + text.slice(idx + mpdTag.length);
+                            text = text.slice(0, idx + mpdTag.length) + `\n  <BaseURL>${escapedBase}</BaseURL>` + text.slice(idx + mpdTag.length);
                         }
                     } else {
                         // If BaseURL exists, rewrite it to go through the proxy too
