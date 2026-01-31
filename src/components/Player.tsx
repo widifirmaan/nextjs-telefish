@@ -60,6 +60,7 @@ export default function Player({ url, title, onClose, headers, license, licenseH
 
     const hlsRef = useRef<any>(null);
     const dashRef = useRef<any>(null);
+    const errorRef = useRef<HTMLDivElement>(null);
 
     useEffect(() => {
         if (!artRef.current) return;
@@ -80,7 +81,7 @@ export default function Player({ url, title, onClose, headers, license, licenseH
             playbackRate: true,
             aspectRatio: true,
             fullscreen: true,
-            fullscreenWeb: true,
+            fullscreenWeb: false,
             subtitleOffset: true,
             miniProgressBar: true,
             mutex: true,
@@ -106,6 +107,12 @@ export default function Player({ url, title, onClose, headers, license, licenseH
                         hls.loadSource(proxyUrl);
                         hls.attachMedia(video);
                         hlsRef.current = hls;
+
+                        hls.on(Hls.Events.ERROR, (event, data) => {
+                            if (data.fatal) {
+                                art.emit('error', data);
+                            }
+                        });
                     } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
                         video.src = proxyUrl;
                     }
@@ -153,30 +160,55 @@ export default function Player({ url, title, onClose, headers, license, licenseH
                     if (license && type !== 'dash-clearkey' && license.startsWith('http')) {
                         player.configure({ drm: { servers: { 'com.widevine.alpha': license } } });
                     }
-                    try { await player.load(proxiedManifestUrl); } catch (e) {}
+                    try { 
+                        await player.load(proxiedManifestUrl); 
+                    } catch (e) {
+                        art.emit('error', e);
+                    }
                 },
             },
         } as any);
+
+        const showError = () => {
+            art.loading.show = false;
+            if (errorRef.current) {
+                errorRef.current.style.display = 'flex';
+            }
+        };
+
+        const hideError = () => {
+            if (errorRef.current) {
+                errorRef.current.style.display = 'none';
+            }
+        };
 
         let hasStartedPlaying = false;
         art.loading.show = false; // Force hide initially
 
         art.on('play', () => {
-            // Only allow spinner after playback has actually started
             hasStartedPlaying = true;
+            hideError();
         });
 
         art.on('video:waiting', () => {
-            // Aggressively hide spinner if not yet playing
             if (!hasStartedPlaying) art.loading.show = false;
         });
 
         art.on('video:playing', () => {
-            // Ensure spinner is hidden once playing
             art.loading.show = false;
+            hideError();
         });
 
+        art.on('error', (err) => {
+            console.error('[Player Error]', err);
+            showError();
+        });
+
+        // Listen for video element errors specifically
+        art.video.addEventListener('error', showError);
+
         return () => {
+            art.video.removeEventListener('error', showError);
             if (hlsRef.current) {
                 hlsRef.current.destroy();
                 hlsRef.current = null;
@@ -192,13 +224,36 @@ export default function Player({ url, title, onClose, headers, license, licenseH
     }, [url, title, headers, license, licenseHeader, type]);
 
     return (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/90 backdrop-blur-md p-4 md:p-10">
-            <div className="relative w-full max-w-5xl aspect-video glass-card overflow-hidden rounded-2xl">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/90 backdrop-blur-md">
+            <div className="relative w-[80vw] h-[80vh] glass-card overflow-hidden rounded-2xl group">
                 <div ref={artRef} className="w-full h-full" />
                 <div ref={ttmlRef} className="absolute inset-0 pointer-events-none z-10" />
+                
+                {/* Custom Error Overlay */}
+                <div 
+                    ref={errorRef}
+                    className="absolute inset-0 z-40 hidden flex-col items-center justify-center bg-black/80 backdrop-blur-sm transition-all duration-300"
+                >
+                    <div className="flex flex-col items-center space-y-4 animate-in fade-in zoom-in duration-300">
+                        <div className="p-4 bg-red-500/20 rounded-full">
+                            <svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="#ef4444" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line></svg>
+                        </div>
+                        <h2 className="text-3xl md:text-5xl font-bold text-white tracking-widest uppercase drop-shadow-[0_0_15px_rgba(239,68,68,0.5)]">
+                            Channel Modar
+                        </h2>
+                        <p className="text-white/60 text-sm md:text-base font-medium">Source error or restriction detected!</p>
+                        <button 
+                            onClick={() => window.location.reload()}
+                            className="mt-4 px-6 py-2 bg-white/10 hover:bg-white/20 text-white rounded-full transition-all border border-white/10"
+                        >
+                            Exit
+                        </button>
+                    </div>
+                </div>
+
                 <button
                     onClick={onClose}
-                    className="absolute top-4 right-4 z-50 p-2 bg-black/50 hover:bg-accent text-white rounded-full transition-colors"
+                    className="absolute top-4 right-4 z-50 p-2 bg-black/50 hover:bg-red-500 text-white rounded-full transition-all hover:scale-110 active:scale-90 opacity-0 group-hover:opacity-100"
                 >
                     <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
                 </button>
