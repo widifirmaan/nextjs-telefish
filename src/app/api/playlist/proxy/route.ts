@@ -2,11 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 
 export const dynamic = 'force-dynamic';
 
-export async function GET(
-    request: NextRequest,
-    { params }: { params: Promise<{ path?: string[] }> }
-) {
-    const { path } = await params;
+export async function GET(request: NextRequest) {
     const searchParams = request.nextUrl.searchParams;
     const targetUrl = searchParams.get('url');
     const referer = searchParams.get('referer') || 'https://duktek.id/';
@@ -15,20 +11,6 @@ export async function GET(
 
     if (!targetUrl) {
         return new NextResponse("Missing url parameter", { status: 400 });
-    }
-
-    // Handle relative segments appended to the proxy URL
-    // If we have a 'path' from the catch-all route, resolve it against targetUrl
-    let finalUrl = targetUrl;
-    if (path && path.length > 0) {
-        const pathExtra = path.join('/');
-        try {
-            // If targetUrl ends with something that isn't a directory, we should probably use its base
-            const baseDir = targetUrl.endsWith('/') ? targetUrl : targetUrl.substring(0, targetUrl.lastIndexOf('/') + 1);
-            finalUrl = new URL(pathExtra, baseDir).toString();
-        } catch (e) {
-            console.warn("[Proxy] URL resolution failed for path:", pathExtra, "relative to:", targetUrl);
-        }
     }
 
     try {
@@ -44,7 +26,7 @@ export async function GET(
         const incomingAccept = request.headers.get('accept');
         if (incomingAccept) headers['Accept'] = incomingAccept;
 
-        const response = await fetch(finalUrl, {
+        const response = await fetch(targetUrl, {
             headers: headers,
         });
 
@@ -77,19 +59,8 @@ export async function GET(
                     text = text.split('\n').map(line => {
                         const trimmed = line.trim();
                         if (!trimmed || trimmed.startsWith('#')) return line;
-                        
-                        let segmentUrl = trimmed;
-                        try { segmentUrl = new URL(trimmed, baseUrl).toString(); } catch (e) { return trimmed; }
-                        
-                        // Proxy the segment URL - use the same directory structure to aid relative resolution
-                        const proxiedLink = new URL(`/api/playlist/proxy/${trimmed}`, request.url);
-                        proxiedLink.searchParams.set('url', targetUrl); // Keep the base manifest URL for context
-                        proxiedLink.searchParams.set('referer', referer);
-                        proxiedLink.searchParams.set('origin', origin);
-                        proxiedLink.searchParams.set('user_agent', userAgent);
-                        if (drm) proxiedLink.searchParams.set('drm', drm);
-                        
-                        return proxiedLink.toString();
+                        if (trimmed.startsWith('http')) return trimmed;
+                        try { return new URL(trimmed, baseUrl).toString(); } catch (e) { return trimmed; }
                     }).join('\n');
                 } else if (isMpd) {
                     // For MPD, we need to rewrite BaseURL to go through our proxy
@@ -101,35 +72,10 @@ export async function GET(
                         if (mpdMatch) {
                             const mpdTag = mpdMatch[0];
                             const idx = text.indexOf(mpdTag);
-                            
-                            // For MPD BaseURL, we point it to the proxy directory
-                            const proxiedBase = new URL('/api/playlist/proxy/segments/', request.url);
-                            proxiedBase.searchParams.set('url', baseUrl);
-                            proxiedBase.searchParams.set('referer', referer);
-                            proxiedBase.searchParams.set('origin', origin);
-                            proxiedBase.searchParams.set('user_agent', userAgent);
-                            if (drm) proxiedBase.searchParams.set('drm', drm);
-                            
-                            // XML Escaping: & -> &amp;
-                            const escapedBase = proxiedBase.toString().replace(/&/g, '&amp;');
-                            
-                            text = text.slice(0, idx + mpdTag.length) + `\n  <BaseURL>${escapedBase}</BaseURL>` + text.slice(idx + mpdTag.length);
+                            text = text.slice(0, idx + mpdTag.length) + `\n  <BaseURL>${baseUrl}</BaseURL>` + text.slice(idx + mpdTag.length);
                         }
                     } else {
-                        // If BaseURL exists, rewrite it to go through the proxy too
-                        text = text.replace(/<BaseURL>(.*?)<\/BaseURL>/g, (m, c) => {
-                            const content = c.trim();
-                            const segmentUrl = content.startsWith('http') ? content : new URL(content, baseUrl).toString();
-                            
-                            const p = new URL('/api/playlist/proxy', request.url);
-                            p.searchParams.set('url', segmentUrl);
-                            p.searchParams.set('referer', referer);
-                            p.searchParams.set('origin', origin);
-                            p.searchParams.set('user_agent', userAgent);
-                            if (drm) p.searchParams.set('drm', drm);
-                            
-                            return `<BaseURL>${p.toString().replace(/&/g, '&amp;')}</BaseURL>`;
-                        });
+                        text = text.replace(/<BaseURL>(.*?)<\/BaseURL>/g, (m, c) => c.trim().startsWith('http') ? m : `<BaseURL>${baseUrl}${c.trim()}</BaseURL>`);
                     }
 
                     if (drm === 'clearkey') {

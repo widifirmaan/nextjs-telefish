@@ -138,12 +138,9 @@ export default function Player({ url, title, onClose, headers, license, licenseH
                     player.getNetworkingEngine()?.registerRequestFilter((type: any, request: any) => {
                         if (request.uris && request.uris.length > 0) {
                             const uri = request.uris[0];
-                            // Proxy if it's external OR if it's a relative/local path that isn't already the proxy
-                            const isAlreadyProxied = uri.includes('/api/playlist/proxy');
-                            const isExternal = uri.startsWith('http') && !uri.includes(window.location.host);
-                            const isMisresolvedLocal = !isAlreadyProxied && (uri.startsWith('/') || !uri.startsWith('http'));
-
-                            if (!isAlreadyProxied && (isExternal || isMisresolvedLocal)) {
+                            if (uri.startsWith('http') && 
+                                !uri.includes(window.location.host) && 
+                                !uri.includes('/api/playlist/proxy')) {
                                 console.log('[Shaka] Proxying request:', uri);
                                 request.uris[0] = getProxyUrl(uri);
                             }
@@ -232,6 +229,11 @@ export default function Player({ url, title, onClose, headers, license, licenseH
                         console.log('[Shaka] Loading manifest:', proxiedManifestUrl);
                         await player.load(proxiedManifestUrl);
                         console.log('[Shaka] Manifest loaded successfully');
+                        
+                        // Autoplay
+                        video.play().catch(e => {
+                            console.warn('[Shaka] Autoplay blocked:', e);
+                        });
                     } catch (e: any) {
                         console.error('[Shaka] Failed to load manifest:', e);
                     }
