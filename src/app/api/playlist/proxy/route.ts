@@ -31,6 +31,8 @@ export async function GET(request: NextRequest) {
             headers: headers,
         });
 
+
+
         const newHeaders = new Headers(response.headers);
         newHeaders.delete('content-encoding');
         

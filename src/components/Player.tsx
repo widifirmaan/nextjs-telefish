@@ -104,13 +104,20 @@ export default function Player({ url, title, onClose, headers, license, licenseH
             customType: {
                 m3u8: function (video: HTMLMediaElement, url: string) {
                     const proxyUrl = getProxyUrl(url);
+
+                    // WebKit / Safari native HLS needs CORS-friendly URIs in playlist and crossOrigin on the video
+                    try { video.crossOrigin = 'anonymous'; video.setAttribute('webkit-playsinline', ''); } catch (e) {}
+
                     if (Hls.isSupported()) {
                         if (hlsRef.current) hlsRef.current.destroy(); // Clean previous
                         const hls = new Hls({
                             xhrSetup: function (xhr, url) {
+                                // Route segment/chunk requests through our proxy so CORS headers are applied
                                 if (!url.includes('api/playlist/proxy')) {
                                     xhr.open('GET', getProxyUrl(url), true);
                                 }
+                                // Avoid sending credentials to upstream
+                                try { xhr.withCredentials = false; } catch (e) {}
                             }
                         });
                         hls.loadSource(proxyUrl);
@@ -118,14 +125,17 @@ export default function Player({ url, title, onClose, headers, license, licenseH
                         hlsRef.current = hls;
 
                         hls.on(Hls.Events.ERROR, (event, data) => {
-                            if (data.fatal) {
+                            if (data && data.fatal) {
                                 art.emit('error', data);
                             }
                         });
                     } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+                        // Native HLS (Safari) — ensure playlist uses proxied URIs (proxy rewrites playlist) and set crossOrigin
+                        try { video.crossOrigin = 'anonymous'; video.setAttribute('webkit-playsinline', ''); } catch (e) {}
                         video.src = proxyUrl;
                     }
                 },
+
                 mpd: async function (video: HTMLMediaElement, url: string) {
                     const shaka = await import('shaka-player') as any;
                     shaka.polyfill.installAll();
@@ -204,7 +214,7 @@ export default function Player({ url, title, onClose, headers, license, licenseH
             internalHideError();
         });
 
-        art.on('error', (err) => {
+        art.on('error', (err: any) => {
             console.error('[Player Error]', err);
             internalShowError();
         });
