@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import Artplayer from 'artplayer';
 import Hls from 'hls.js';
 
@@ -60,7 +60,15 @@ export default function Player({ url, title, onClose, headers, license, licenseH
 
     const hlsRef = useRef<any>(null);
     const dashRef = useRef<any>(null);
-    const errorRef = useRef<HTMLDivElement>(null);
+    const [showErrorOverlay, setShowErrorOverlay] = useState(false);
+    
+    const showError = () => {
+        setShowErrorOverlay(true);
+    };
+
+    const hideError = () => {
+        setShowErrorOverlay(false);
+    };
 
     useEffect(() => {
         if (!artRef.current) return;
@@ -91,6 +99,7 @@ export default function Player({ url, title, onClose, headers, license, licenseH
             airplay: true,
             theme: '#6366f1',
             loading: false, 
+            click: false,
             type: url.includes('.mpd') ? 'mpd' : 'm3u8',
             customType: {
                 m3u8: function (video: HTMLMediaElement, url: string) {
@@ -169,17 +178,13 @@ export default function Player({ url, title, onClose, headers, license, licenseH
             },
         } as any);
 
-        const showError = () => {
+        const internalShowError = () => {
             art.loading.show = false;
-            if (errorRef.current) {
-                errorRef.current.style.display = 'flex';
-            }
+            showError();
         };
 
-        const hideError = () => {
-            if (errorRef.current) {
-                errorRef.current.style.display = 'none';
-            }
+        const internalHideError = () => {
+            hideError();
         };
 
         let hasStartedPlaying = false;
@@ -187,7 +192,7 @@ export default function Player({ url, title, onClose, headers, license, licenseH
 
         art.on('play', () => {
             hasStartedPlaying = true;
-            hideError();
+            internalHideError();
         });
 
         art.on('video:waiting', () => {
@@ -196,19 +201,19 @@ export default function Player({ url, title, onClose, headers, license, licenseH
 
         art.on('video:playing', () => {
             art.loading.show = false;
-            hideError();
+            internalHideError();
         });
 
         art.on('error', (err) => {
             console.error('[Player Error]', err);
-            showError();
+            internalShowError();
         });
 
         // Listen for video element errors specifically
-        art.video.addEventListener('error', showError);
+        art.video.addEventListener('error', internalShowError);
 
         return () => {
-            art.video.removeEventListener('error', showError);
+            art.video.removeEventListener('error', internalShowError);
             if (hlsRef.current) {
                 hlsRef.current.destroy();
                 hlsRef.current = null;
@@ -231,8 +236,7 @@ export default function Player({ url, title, onClose, headers, license, licenseH
                 
                 {/* Custom Error Overlay */}
                 <div 
-                    ref={errorRef}
-                    className="absolute inset-0 z-40 hidden flex-col items-center justify-center bg-black/80 backdrop-blur-sm transition-all duration-300"
+                    className={`absolute inset-0 z-40 flex-col items-center justify-center bg-black/80 backdrop-blur-sm transition-all duration-300 ${showErrorOverlay ? 'flex' : 'hidden'}`}
                 >
                     <div className="flex flex-col items-center space-y-4 animate-in fade-in zoom-in duration-300">
                         <div className="p-4 bg-red-500/20 rounded-full">
@@ -243,17 +247,17 @@ export default function Player({ url, title, onClose, headers, license, licenseH
                         </h2>
                         <p className="text-white/60 text-sm md:text-base font-medium">Source error or restriction detected!</p>
                         <button 
-                            onClick={() => window.location.reload()}
+                            onClick={hideError}
                             className="mt-4 px-6 py-2 bg-white/10 hover:bg-white/20 text-white rounded-full transition-all border border-white/10"
                         >
-                            Exit
+                            Dismiss
                         </button>
                     </div>
                 </div>
 
                 <button
                     onClick={onClose}
-                    className="absolute top-4 right-4 z-50 p-2 bg-black/50 hover:bg-red-500 text-white rounded-full transition-all hover:scale-110 active:scale-90 opacity-0 group-hover:opacity-100"
+                    className="absolute top-4 right-4 z-50 p-2 bg-black/50 hover:bg-red-500 text-white rounded-full transition-all hover:scale-110 active:scale-90"
                 >
                     <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
                 </button>
