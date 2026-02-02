@@ -73,6 +73,8 @@ export default function Player({ url, title, onClose, headers, license, licenseH
     useEffect(() => {
         if (!artRef.current) return;
 
+        const isWebKit = typeof navigator !== 'undefined' && /AppleWebKit/.test(navigator.userAgent) && !/Chrome/.test(navigator.userAgent);
+
         const art = new Artplayer({
             container: artRef.current,
             url: url,
@@ -124,6 +126,18 @@ export default function Player({ url, title, onClose, headers, license, licenseH
                         hls.attachMedia(video);
                         hlsRef.current = hls;
 
+                        // Try muted autoplay on WebKit (Safari/iOS): set playsinline attrs and attempt play
+                        if (isWebKit) {
+                            try {
+                                video.muted = true;
+                                video.setAttribute('playsinline', '');
+                                video.setAttribute('webkit-playsinline', '');
+                                // Best-effort, may reject if autoplay blocked
+                                const p = video.play();
+                                if (p && typeof (p as any).catch === 'function') (p as any).catch(() => {});
+                            } catch (e) { /* ignore */ }
+                        }
+
                         hls.on(Hls.Events.ERROR, (event, data) => {
                             if (data && data.fatal) {
                                 art.emit('error', data);
@@ -132,6 +146,11 @@ export default function Player({ url, title, onClose, headers, license, licenseH
                     } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
                         // Native HLS (Safari) — ensure playlist uses proxied URIs (proxy rewrites playlist) and set crossOrigin
                         try { video.crossOrigin = 'anonymous'; video.setAttribute('webkit-playsinline', ''); } catch (e) {}
+                        // For Safari, attempt muted autoplay for native HLS
+                        if (isWebKit) {
+                            try { video.muted = true; video.setAttribute('playsinline', ''); } catch (e) {}
+                            const p = video.play(); if (p && typeof (p as any).catch === 'function') (p as any).catch(() => {});
+                        }
                         video.src = proxyUrl;
                     }
                 },
@@ -180,7 +199,16 @@ export default function Player({ url, title, onClose, headers, license, licenseH
                         player.configure({ drm: { servers: { 'com.widevine.alpha': license } } });
                     }
                     try { 
-                        await player.load(proxiedManifestUrl); 
+                        await player.load(proxiedManifestUrl);
+                        // Attempt muted autoplay on WebKit after manifest load
+                        if (isWebKit) {
+                            try {
+                                video.muted = true;
+                                video.setAttribute('playsinline', '');
+                                video.setAttribute('webkit-playsinline', '');
+                                const p = video.play(); if (p && typeof (p as any).catch === 'function') (p as any).catch(() => {});
+                            } catch (e) { /* ignore */ }
+                        }
                     } catch (e) {
                         art.emit('error', e);
                     }
