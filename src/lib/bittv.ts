@@ -2,22 +2,27 @@ export interface Channel {
     id: string;
     name: string;
     tagline?: string;
-    logo?: string;
-    hls?: string;
-    group?: string;
-    category?: string;
-    source?: string;
+    hls: string;
+    namespace?: string;
+    is_live?: string;
+    is_movie?: string;
+    image?: string;
+    header_iptv?: string;
+    url_license?: string;
+    header_license?: string;
+    jenis?: string;
     [key: string]: any;
 }
 
-export interface PlaylistResponse {
-    country_name: string;
-    country: string;
-    info: Channel[];
+export interface PlaylistData {
+    indonesia: Channel[];
+    event: Channel[];
+    version: string;
+    lastUpdated: number;
 }
 
-const PLAYLIST_ID_URL = "https://raw.githubusercontent.com/brodatv1/lite/main/ID.json";
-const PLAYLIST_EV_URL = "https://raw.githubusercontent.com/brodatv1/lite/main/EV.json";
+const BASE_URL = "https://raw.githubusercontent.com/brodatv1/lite/main";
+const GITHUB_API_URL = "https://api.github.com/repos/brodatv1/lite/contents/";
 
 function reverse(s: string): string {
     return s.split('').reverse().join('');
@@ -43,7 +48,19 @@ function k0(input: string): string {
 }
 
 function decryptPlaylist(encryptedInfo: string): string {
-    console.log("Starting decryption scan...");
+    // First, try to parse as plain JSON (might not be encrypted)
+    try {
+        const parsed = JSON.parse(encryptedInfo);
+        // Check if it looks like playlist data
+        if (parsed.data || parsed.info || Array.isArray(parsed)) {
+            console.log("[Playlist] Data is plain JSON, not encrypted");
+            return encryptedInfo;
+        }
+    } catch (e) {
+        // Not plain JSON, proceed with decryption
+    }
+
+    console.log("[Playlist] Starting decryption scan...");
 
     // Optimization: Check known common offset (98) first
     const offsetsToCheck = [98, ...Array.from({ length: 1000 }, (_, i) => i).filter(i => i !== 98)];
@@ -62,7 +79,7 @@ function decryptPlaylist(encryptedInfo: string): string {
                     const candidate = trimmed.substring(0, lastBrace + 1);
                     try {
                         JSON.parse(candidate);
-                        console.log(`Successfully decrypted and parsed at offset ${i}`);
+                        console.log(`[Playlist] Successfully decrypted and parsed at offset ${i}`);
                         return candidate;
                     } catch (e) {
                         // Not a complete JSON yet, continue scanning
@@ -73,124 +90,160 @@ function decryptPlaylist(encryptedInfo: string): string {
             // ignore
         }
     }
-    console.error("All offsets failed decryption.");
-    return JSON.stringify({ error: "Decryption failed" });
+
+    console.error("[Playlist] All offsets failed decryption.");
+    return encryptedInfo; // Return original as fallback, maybe it's partially valid
+}
+
+async function getLatestVersion(): Promise<string> {
+    try {
+        const res = await fetch(GITHUB_API_URL, {
+            headers: { 'Cache-Control': 'no-cache' }
+        });
+        if (!res.ok) throw new Error(`GitHub API error: ${res.status}`);
+        
+        const data = await res.json() as Array<{ name: string }>;
+        // Find directories (versions) and sort them - they should be numeric folder names
+        const versions = data
+            .filter(item => item.name && /^\d+$/.test(item.name))
+            .map(item => parseInt(item.name, 10))
+            .sort((a, b) => b - a);
+        
+        if (versions.length === 0) {
+            console.warn('[Playlist] No versions found, using default');
+            return 'default';
+        }
+        
+        const latest = versions[0].toString();
+        console.log(`[Playlist] Latest version: ${latest}`);
+        return latest;
+    } catch (e) {
+        console.error('[Playlist] Error getting latest version:', e);
+        return 'default';
+    }
 }
 
 // Simple in-memory cache
-let cachedPlaylist: PlaylistResponse | null = null;
+let cachedPlaylist: PlaylistData | null = null;
 let lastFetchTime = 0;
 const CACHE_DURATION = 1000 * 60 * 5; // 5 minutes
 
-async function fetchFromUrl(url: string, useDecryption: boolean = false, source: string = ""): Promise<PlaylistResponse | null> {
+async function fetchAndDecrypt(url: string): Promise<Channel[] | null> {
     try {
-        console.log(`Fetching from ${url}`);
+        console.log(`[Playlist] Fetching from ${url}`);
         const res = await fetch(url, { 
-            next: { revalidate: 300 },
             headers: { 'Cache-Control': 'no-cache' }
         });
         
-        if (!res.ok) throw new Error(`Failed to fetch: ${res.status}`);
-
-        const text = await res.text();
-        let decrypted = text;
-        
-        if (useDecryption) {
-            decrypted = decryptPlaylist(text);
+        if (!res.ok) {
+            console.error(`[Playlist] Fetch failed with status ${res.status}`);
+            return null;
         }
 
-        const data = JSON.parse(decrypted);
+        let text = await res.text();
+        console.log(`[Playlist] Raw response length: ${text.length}, first 150 chars: ${text.substring(0, 150)}`);
         
-        // Handle different response formats
-        let channels = [];
+        // Check if data looks like it's already JSON (not encrypted)
+        let data;
+        try {
+            // Try parsing first before decryption
+            data = JSON.parse(text);
+            console.log(`[Playlist] Data is plain JSON, parsed successfully`);
+        } catch (e) {
+            // Not plain JSON, try decryption
+            console.log(`[Playlist] Not plain JSON, attempting decryption...`);
+            const decrypted = decryptPlaylist(text);
+            try {
+                data = JSON.parse(decrypted);
+                console.log(`[Playlist] Decryption successful`);
+            } catch (parseErr) {
+                console.error(`[Playlist] JSON parse error after decryption for ${url}:`, parseErr);
+                return null;
+            }
+        }
+        
+        // Extract channels from various possible structures
+        let channels: Channel[] = [];
         if (data.info && Array.isArray(data.info)) {
             channels = data.info;
-        } else if (Array.isArray(data)) {
-            channels = data;
-        } else if (data.channels && Array.isArray(data.channels)) {
-            channels = data.channels;
+            console.log(`[Playlist] Found ${channels.length} channels in data.info`);
         } else if (data.data && Array.isArray(data.data)) {
             channels = data.data;
+            console.log(`[Playlist] Found ${channels.length} channels in data.data`);
+        } else if (Array.isArray(data)) {
+            channels = data;
+            console.log(`[Playlist] Found ${channels.length} channels in root array`);
+        } else {
+            console.warn(`[Playlist] No channel array found in response, keys:`, Object.keys(data).slice(0, 10));
+            return null;
         }
         
-        // Normalize channel fields - handle different field names
-        const processedChannels = channels.map((ch: any) => ({
-            ...ch,
-            id: ch.id || ch.tvg_id || `ch_${Date.now()}_${Math.random()}`,
-            name: ch.name || ch.tvg_name || ch.title || 'Unknown',
-            hls: ch.hls || ch.url || ch.stream_url || ch.link || '',
-            logo: ch.logo || ch.tvg_logo || ch.image || ch.thumb || '',
-            source: source || data.country || "Unknown"
-        }));
-        
-        return {
-            country_name: data.country_name || data.country || source || "Unknown",
-            country: data.country || source || "Unknown",
-            info: processedChannels,
-        };
+        console.log(`[Playlist] Extracted ${channels.length} channels from ${url}`);
+        return channels.length > 0 ? channels : null;
     } catch (e) {
-        console.error(`Error fetching from ${url}:`, e);
+        console.error(`[Playlist] Error fetching/decrypting ${url}:`, e);
         return null;
     }
 }
 
-export async function fetchPlaylist(): Promise<PlaylistResponse | null> {
-    const now = Date.now();
-    if (cachedPlaylist && lastFetchTime > 0 && (now - lastFetchTime < CACHE_DURATION)) {
-        console.log("Returning playlist from cache");
-        return cachedPlaylist;
-    }
-
+let isUpdating = false;
+async function triggerBackgroundUpdate() {
+    if (isUpdating) return;
+    isUpdating = true;
+    
     try {
-        const fetchTime = Date.now();
-        console.log("Fetching ID.json and EV.json with categories");
-        
-        // Fetch both in parallel
-        const [idPlaylist, evPlaylist] = await Promise.all([
-            fetchFromUrl(PLAYLIST_ID_URL, true, "Indonesia"),
-            fetchFromUrl(PLAYLIST_EV_URL, false, "Event"),
+        const result = await performFetch();
+        if (result) {
+            console.log('[Playlist] Background update completed');
+        }
+    } finally {
+        isUpdating = false;
+    }
+}
+
+async function performFetch(): Promise<PlaylistData | null> {
+    try {
+        const version = await getLatestVersion();
+        console.log(`[Playlist] Fetching version ${version}`);
+
+        const idUrl = `${BASE_URL}/${version}/ID.json`;
+        const evUrl = `${BASE_URL}/${version}/EV.json`;
+
+        const [idChannels, evChannels] = await Promise.all([
+            fetchAndDecrypt(idUrl),
+            fetchAndDecrypt(evUrl)
         ]);
 
-        if (!idPlaylist && !evPlaylist) {
-            return null;
-        }
-
-        // Combine all channels with category
-        const allChannels: Channel[] = [];
-
-        // Add ID.json channels with "indonesia" category
-        if (idPlaylist && Array.isArray(idPlaylist.info)) {
-            idPlaylist.info.forEach(ch => {
-                allChannels.push({
-                    ...ch,
-                    category: "indonesia",
-                    source: "Indonesia"
-                });
-            });
-        }
-
-        // Add EV.json channels with "event" category
-        if (evPlaylist && Array.isArray(evPlaylist.info)) {
-            evPlaylist.info.forEach(ch => {
-                allChannels.push({
-                    ...ch,
-                    category: "event",
-                    source: "Event"
-                });
-            });
-        }
-
-        cachedPlaylist = {
-            country_name: 'Indonesia & Event',
-            country: 'ID+EV',
-            info: allChannels,
+        const data: PlaylistData = {
+            indonesia: idChannels || [],
+            event: evChannels || [],
+            version: version,
+            lastUpdated: Date.now()
         };
-        lastFetchTime = fetchTime;
 
-        console.log(`Playlist loaded: ${allChannels.length} channels (${idPlaylist?.info?.length || 0} Indonesia + ${evPlaylist?.info?.length || 0} Event)`);
-        return cachedPlaylist;
+        cachedPlaylist = data;
+        lastFetchTime = Date.now();
+        return data;
     } catch (e) {
-        console.error("Error fetching playlist:", e);
+        console.error("[Playlist] Error performing fetch:", e);
         return null;
     }
+}
+
+export async function fetchPlaylist(force: boolean = false): Promise<PlaylistData | null> {
+    const now = Date.now();
+    
+    // Return cache if fresh enough and not forced
+    if (!force && cachedPlaylist && (now - lastFetchTime < CACHE_DURATION)) {
+        return cachedPlaylist;
+    }
+
+    // If we have stale cache, trigger background update and return stale data
+    if (!force && cachedPlaylist) {
+        console.log("[Playlist] Returning stale cache, triggering background update...");
+        triggerBackgroundUpdate();
+        return cachedPlaylist;
+    }
+
+    return performFetch();
 }
