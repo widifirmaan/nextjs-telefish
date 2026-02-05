@@ -75,6 +75,25 @@ export default function Player({ url, title, onClose, headers, license, licenseH
         let isActive = true;
         const isWebKit = typeof navigator !== 'undefined' && /AppleWebKit/.test(navigator.userAgent) && !/Chrome/.test(navigator.userAgent);
 
+        // Determine stream type: prioritize explicit 'type' prop, then URL pattern, then 'jenis' property
+        let streamType = 'mpd';
+        if (type && (type.includes('dash') || type === 'mpd')) {
+            streamType = 'mpd';
+            console.log('[Player] Using explicit type prop (DASH):', type);
+        } else if (url.includes('.mpd')) {
+            streamType = 'mpd';
+            console.log('[Player] Detected from URL: .mpd extension');
+        } else {
+            streamType = 'm3u8';
+            console.log('[Player] Default to HLS: .m3u8');
+        }
+        console.log('[Player] Stream Type Detection:', { 
+            url: url, 
+            detectedType: streamType,
+            typeFromProps: type,
+            isMPD: url.includes('.mpd')
+        });
+        
         const art = new Artplayer({
             container: artRef.current,
             url: url,
@@ -101,9 +120,10 @@ export default function Player({ url, title, onClose, headers, license, licenseH
             theme: '#6366f1',
             loading: false, 
             click: false,
-            type: url.includes('.mpd') ? 'mpd' : 'm3u8',
+            type: streamType,
             customType: {
                 m3u8: function (video: HTMLMediaElement, url: string) {
+                    console.log('[Player] Processing M3U8 stream:', { url, proxyUrl: getProxyUrl(url) });
                     const proxyUrl = getProxyUrl(url);
 
                     // WebKit / Safari native HLS needs CORS-friendly URIs in playlist and crossOrigin on the video
@@ -155,6 +175,7 @@ export default function Player({ url, title, onClose, headers, license, licenseH
                 },
 
                 mpd: async function (video: HTMLMediaElement, url: string) {
+                    console.log('[Player] Initializing DASH (MPD) stream:', { url, hasShaka: typeof window !== 'undefined' && !!(window as any).shaka });
                     const shaka = await import('shaka-player') as any;
                     shaka.polyfill.installAll();
                     if (!shaka.Player.isBrowserSupported()) return;
@@ -212,7 +233,9 @@ export default function Player({ url, title, onClose, headers, license, licenseH
                     }
                     try { 
                         if (!isActive) return;
+                        console.log('[Player] Loading DASH manifest from:', proxiedManifestUrl);
                         await player.load(proxiedManifestUrl);
+                        console.log('[Player] DASH manifest loaded successfully');
                         // Attempt muted autoplay on WebKit after manifest load
                         if (isActive && isWebKit) {
                             try {
@@ -222,7 +245,13 @@ export default function Player({ url, title, onClose, headers, license, licenseH
                                 const p = video.play(); if (p && typeof (p as any).catch === 'function') (p as any).catch(() => {});
                             } catch (e) { /* ignore */ }
                         }
-                    } catch (e) {
+                    } catch (e: any) {
+                        console.error('[Player] DASH Error Details:', {
+                            message: e?.message,
+                            code: e?.code,
+                            stack: e?.stack,
+                            url: proxiedManifestUrl
+                        });
                         if (isActive) art.emit('error', e);
                     }
                 },

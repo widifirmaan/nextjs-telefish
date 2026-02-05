@@ -4,12 +4,23 @@ import { fetchPlaylist } from '@/lib/bittv';
 export const dynamic = 'force-dynamic'; // disable static caching
 
 export async function GET(request: Request) {
-    const { searchParams } = new URL(request.url);
-    const force = searchParams.get('refresh') === 'true';
-    
-    const playlist = await fetchPlaylist(force);
-    if (!playlist) {
-        return NextResponse.json({ error: 'Failed to fetch playlist' }, { status: 500 });
+    try {
+        const playlist = await fetchPlaylist();
+
+        if (!playlist) {
+            return NextResponse.json(
+                { error: 'Failed to fetch playlist' },
+                { status: 500 }
+            );
+        }
+
+        return NextResponse.json(playlist);
+    } catch (error) {
+        const errorMsg = error instanceof Error ? error.message : String(error);
+        console.error('Playlist API error:', errorMsg, error);
+        return NextResponse.json(
+            { error: 'Internal server error', details: errorMsg },
+            { status: 500 }
+        );
     }
-    return NextResponse.json(playlist);
 }

@@ -5,18 +5,19 @@ export interface Channel {
     logo?: string;
     hls?: string;
     group?: string;
+    category?: string;
+    source?: string;
     [key: string]: any;
 }
 
-const BASE_URL = "https://raw.githubusercontent.com/brodatv1/lite/main";
-const GITHUB_API_URL = "https://api.github.com/repos/brodatv1/lite/contents/";
-
-export interface PlaylistData {
-    indonesia: Channel[];
-    event: Channel[];
-    version: string;
-    lastUpdated: number;
+export interface PlaylistResponse {
+    country_name: string;
+    country: string;
+    info: Channel[];
 }
+
+const PLAYLIST_ID_URL = "https://raw.githubusercontent.com/brodatv1/lite/main/ID.json";
+const PLAYLIST_EV_URL = "https://raw.githubusercontent.com/brodatv1/lite/main/EV.json";
 
 function reverse(s: string): string {
     return s.split('').reverse().join('');
@@ -77,100 +78,119 @@ function decryptPlaylist(encryptedInfo: string): string {
 }
 
 // Simple in-memory cache
-let cachedPlaylist: PlaylistData | null = null;
+let cachedPlaylist: PlaylistResponse | null = null;
 let lastFetchTime = 0;
 const CACHE_DURATION = 1000 * 60 * 5; // 5 minutes
 
-async function getLatestVersion(): Promise<string> {
+async function fetchFromUrl(url: string, useDecryption: boolean = false, source: string = ""): Promise<PlaylistResponse | null> {
     try {
-        const res = await fetch(GITHUB_API_URL, { next: { revalidate: 3600 } });
-        if (!res.ok) return "v216"; // Fallback to a known version
+        console.log(`Fetching from ${url}`);
+        const res = await fetch(url, { 
+            next: { revalidate: 300 },
+            headers: { 'Cache-Control': 'no-cache' }
+        });
+        
+        if (!res.ok) throw new Error(`Failed to fetch: ${res.status}`);
 
-        const contents = await res.json();
-        const versions = contents
-            .filter((item: any) => item.type === "dir" && /^v\d+/.test(item.name))
-            .map((item: any) => item.name)
-            .sort((a: string, b: string) => {
-                const numA = parseInt(a.replace(/\D/g, ''));
-                const numB = parseInt(b.replace(/\D/g, ''));
-                return numB - numA;
-            });
-
-        return versions[0] || "v216";
-    } catch (e) {
-        console.error("Error fetching latest version:", e);
-        return "v216";
-    }
-}
-
-async function fetchAndDecrypt(url: string): Promise<Channel[] | null> {
-    try {
-        const res = await fetch(url, { cache: 'no-store' });
-        if (!res.ok) return null;
         const text = await res.text();
-        const decrypted = decryptPlaylist(text);
-        const parsed = JSON.parse(decrypted);
-        return parsed.info || [];
+        let decrypted = text;
+        
+        if (useDecryption) {
+            decrypted = decryptPlaylist(text);
+        }
+
+        const data = JSON.parse(decrypted);
+        
+        // Handle different response formats
+        let channels = [];
+        if (data.info && Array.isArray(data.info)) {
+            channels = data.info;
+        } else if (Array.isArray(data)) {
+            channels = data;
+        } else if (data.channels && Array.isArray(data.channels)) {
+            channels = data.channels;
+        } else if (data.data && Array.isArray(data.data)) {
+            channels = data.data;
+        }
+        
+        // Normalize channel fields - handle different field names
+        const processedChannels = channels.map((ch: any) => ({
+            ...ch,
+            id: ch.id || ch.tvg_id || `ch_${Date.now()}_${Math.random()}`,
+            name: ch.name || ch.tvg_name || ch.title || 'Unknown',
+            hls: ch.hls || ch.url || ch.stream_url || ch.link || '',
+            logo: ch.logo || ch.tvg_logo || ch.image || ch.thumb || '',
+            source: source || data.country || "Unknown"
+        }));
+        
+        return {
+            country_name: data.country_name || data.country || source || "Unknown",
+            country: data.country || source || "Unknown",
+            info: processedChannels,
+        };
     } catch (e) {
-        console.error(`Error fetching/decrypting ${url}:`, e);
+        console.error(`Error fetching from ${url}:`, e);
         return null;
     }
 }
 
-let isUpdating = false;
-async function triggerBackgroundUpdate() {
-    if (isUpdating) return;
-    isUpdating = true;
-    try {
-        await performFetch();
-    } finally {
-        isUpdating = false;
+export async function fetchPlaylist(): Promise<PlaylistResponse | null> {
+    const now = Date.now();
+    if (cachedPlaylist && lastFetchTime > 0 && (now - lastFetchTime < CACHE_DURATION)) {
+        console.log("Returning playlist from cache");
+        return cachedPlaylist;
     }
-}
 
-async function performFetch(): Promise<PlaylistData | null> {
     try {
-        const version = await getLatestVersion();
-        console.log(`Fetching playlist version ${version}`);
-
-        const idUrl = `${BASE_URL}/${version}/ID.json`;
-        const evUrl = `${BASE_URL}/${version}/EV.json`;
-
-        const [idChannels, evChannels] = await Promise.all([
-            fetchAndDecrypt(idUrl),
-            fetchAndDecrypt(evUrl)
+        const fetchTime = Date.now();
+        console.log("Fetching ID.json and EV.json with categories");
+        
+        // Fetch both in parallel
+        const [idPlaylist, evPlaylist] = await Promise.all([
+            fetchFromUrl(PLAYLIST_ID_URL, true, "Indonesia"),
+            fetchFromUrl(PLAYLIST_EV_URL, false, "Event"),
         ]);
 
-        const data: PlaylistData = {
-            indonesia: idChannels || [],
-            event: evChannels || [],
-            version: version,
-            lastUpdated: Date.now()
-        };
+        if (!idPlaylist && !evPlaylist) {
+            return null;
+        }
 
-        cachedPlaylist = data;
-        lastFetchTime = Date.now();
-        return data;
+        // Combine all channels with category
+        const allChannels: Channel[] = [];
+
+        // Add ID.json channels with "indonesia" category
+        if (idPlaylist && Array.isArray(idPlaylist.info)) {
+            idPlaylist.info.forEach(ch => {
+                allChannels.push({
+                    ...ch,
+                    category: "indonesia",
+                    source: "Indonesia"
+                });
+            });
+        }
+
+        // Add EV.json channels with "event" category
+        if (evPlaylist && Array.isArray(evPlaylist.info)) {
+            evPlaylist.info.forEach(ch => {
+                allChannels.push({
+                    ...ch,
+                    category: "event",
+                    source: "Event"
+                });
+            });
+        }
+
+        cachedPlaylist = {
+            country_name: 'Indonesia & Event',
+            country: 'ID+EV',
+            info: allChannels,
+        };
+        lastFetchTime = fetchTime;
+
+        console.log(`Playlist loaded: ${allChannels.length} channels (${idPlaylist?.info?.length || 0} Indonesia + ${evPlaylist?.info?.length || 0} Event)`);
+        return cachedPlaylist;
     } catch (e) {
-        console.error("Error performing fetch:", e);
+        console.error("Error fetching playlist:", e);
         return null;
     }
-}
-
-export async function fetchPlaylist(force: boolean = false): Promise<PlaylistData | null> {
-    const now = Date.now();
-    
-    // Return cache if fresh enough and not forced
-    if (!force && cachedPlaylist && (now - lastFetchTime < CACHE_DURATION)) {
-        return cachedPlaylist;
-    }
-
-    // If we have stale cache, trigger background update and return stale data
-    if (!force && cachedPlaylist) {
-        console.log("Returning stale cache, triggering background update...");
-        triggerBackgroundUpdate();
-        return cachedPlaylist;
-    }
-
-    return performFetch();
 }
