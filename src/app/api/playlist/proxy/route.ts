@@ -114,7 +114,22 @@ async function handleRequest(request: NextRequest) {
 
     } catch (e: any) {
         console.error("Proxy main error:", e);
-        return new NextResponse(`Proxy Error: ${e.message}`, { status: 500 });
+        const errorMessage = e.message || 'Unknown error';
+        const isNetworkError = errorMessage.includes('fetch') || errorMessage.includes('network') || errorMessage.includes('connect');
+        
+        if (isNetworkError) {
+            return new NextResponse(JSON.stringify({
+                error: 'Network/CDN Error',
+                message: 'Unable to reach streaming source. This may be due to: geo-blocking, CDN issues, expired token, or connectivity problems.',
+                details: errorMessage,
+                suggestion: 'Try a different channel or wait a moment and refresh.'
+            }), { status: 502, headers: { 'Content-Type': 'application/json' } });
+        }
+        
+        return new NextResponse(JSON.stringify({
+            error: 'Proxy Error',
+            message: errorMessage
+        }), { status: 500, headers: { 'Content-Type': 'application/json' } });
     }
 }
 

@@ -18,6 +18,11 @@ export default function Player({ url, title, onClose, headers, license, licenseH
     const artRef = useRef<HTMLDivElement>(null);
     const ttmlRef = useRef<HTMLDivElement>(null);
 
+    // Detect if 'license' field is actually a stream URL (for Events channels with swapped fields)
+    // If url_license starts with http/https, it's likely the actual stream URL, not a DRM license
+    const actualStreamUrl = license && (license.startsWith('http://') || license.startsWith('https://')) ? license : url;
+    const actualLicense = license && (license.startsWith('http://') || license.startsWith('https://')) ? null : license;
+
     // Construct Proxy URL with headers
     const getProxyUrl = (targetUrl: string, drm?: string) => {
         const params = new URLSearchParams({ url: targetUrl });
@@ -61,13 +66,16 @@ export default function Player({ url, title, onClose, headers, license, licenseH
     const hlsRef = useRef<any>(null);
     const dashRef = useRef<any>(null);
     const [showErrorOverlay, setShowErrorOverlay] = useState(false);
+    const [errorMessage, setErrorMessage] = useState<string | null>(null);
     
-    const showError = () => {
+    const showError = (msg?: string) => {
+        setErrorMessage(msg || null);
         setShowErrorOverlay(true);
     };
 
     const hideError = () => {
         setShowErrorOverlay(false);
+        setErrorMessage(null);
     };
 
     useEffect(() => {
@@ -80,7 +88,7 @@ export default function Player({ url, title, onClose, headers, license, licenseH
         if (type && (type.includes('dash') || type === 'mpd')) {
             streamType = 'mpd';
             console.log('[Player] Using explicit type prop (DASH):', type);
-        } else if (url.includes('.mpd')) {
+        } else if (actualStreamUrl.includes('.mpd')) {
             streamType = 'mpd';
             console.log('[Player] Detected from URL: .mpd extension');
         } else {
@@ -88,15 +96,16 @@ export default function Player({ url, title, onClose, headers, license, licenseH
             console.log('[Player] Default to HLS: .m3u8');
         }
         console.log('[Player] Stream Type Detection:', { 
-            url: url, 
+            url: actualStreamUrl, 
             detectedType: streamType,
             typeFromProps: type,
-            isMPD: url.includes('.mpd')
+            isMPD: actualStreamUrl.includes('.mpd'),
+            urlLicenseUsedAsStream: license && (license.startsWith('http://') || license.startsWith('https://'))
         });
         
         const art = new Artplayer({
             container: artRef.current,
-            url: url,
+            url: actualStreamUrl,
             title: title,
             volume: 1,
             isLive: true,
@@ -123,8 +132,8 @@ export default function Player({ url, title, onClose, headers, license, licenseH
             type: streamType,
             customType: {
                 m3u8: function (video: HTMLMediaElement, url: string) {
-                    console.log('[Player] Processing M3U8 stream:', { url, proxyUrl: getProxyUrl(url) });
-                    const proxyUrl = getProxyUrl(url);
+                    console.log('[Player] Processing M3U8 stream:', { url: actualStreamUrl, proxyUrl: getProxyUrl(actualStreamUrl) });
+                    const proxyUrl = getProxyUrl(actualStreamUrl);
 
                     // WebKit / Safari native HLS needs CORS-friendly URIs in playlist and crossOrigin on the video
                     try { video.crossOrigin = 'anonymous'; video.setAttribute('webkit-playsinline', ''); } catch (e) {}
@@ -175,7 +184,7 @@ export default function Player({ url, title, onClose, headers, license, licenseH
                 },
 
                 mpd: async function (video: HTMLMediaElement, url: string) {
-                    console.log('[Player] Initializing DASH (MPD) stream:', { url, hasShaka: typeof window !== 'undefined' && !!(window as any).shaka });
+                    console.log('[Player] Initializing DASH (MPD) stream:', { url: actualStreamUrl, hasShaka: typeof window !== 'undefined' && !!(window as any).shaka });
                     const shaka = await import('shaka-player') as any;
                     shaka.polyfill.installAll();
                     if (!shaka.Player.isBrowserSupported()) return;
@@ -197,7 +206,7 @@ export default function Player({ url, title, onClose, headers, license, licenseH
                     dashRef.current = player;
                     (window as any).__shakaPlayer = player;
                     const drmType = type?.includes('clearkey') ? 'clearkey' : undefined;
-                    const proxiedManifestUrl = getProxyUrl(url, drmType);
+                    const proxiedManifestUrl = getProxyUrl(actualStreamUrl, drmType);
                     player.getNetworkingEngine()?.registerRequestFilter((type: any, request: any) => {
                         if (request.uris && request.uris.length > 0) {
                             const uri = request.uris[0];
@@ -206,7 +215,7 @@ export default function Player({ url, title, onClose, headers, license, licenseH
                             }
                         }
                     });
-                    if (license && type === 'dash-clearkey') {
+                    if (actualLicense && type === 'dash-clearkey') {
                         try {
                             const base64ToHex = (base64: string) => {
                                 let normalized = base64.replace(/-/g, '+').replace(/_/g, '/');
@@ -216,7 +225,7 @@ export default function Player({ url, title, onClose, headers, license, licenseH
                                 for (let i = 0; i < binary.length; i++) hex += binary.charCodeAt(i).toString(16).padStart(2, '0');
                                 return hex;
                             };
-                            const normalizedLicense = license.replace(/-/g, '+').replace(/_/g, '/');
+                            const normalizedLicense = actualLicense.replace(/-/g, '+').replace(/_/g, '/');
                             const paddedLicense = normalizedLicense.length % 4 === 0 ? normalizedLicense : normalizedLicense + '='.repeat(4 - (normalizedLicense.length % 4));
                             const licenseData = JSON.parse(atob(paddedLicense));
                             if (licenseData.keys) {
@@ -252,7 +261,11 @@ export default function Player({ url, title, onClose, headers, license, licenseH
                             stack: e?.stack,
                             url: proxiedManifestUrl
                         });
-                        if (isActive) art.emit('error', e);
+                        const errorMsg = e?.message || 'Failed to load DASH stream';
+                        if (isActive) {
+                            showError(errorMsg);
+                            art.emit('error', e);
+                        }
                     }
                 },
             },
@@ -286,7 +299,34 @@ export default function Player({ url, title, onClose, headers, license, licenseH
 
         art.on('error', (err: any) => {
             console.error('[Player Error]', err);
+
+            // Best-effort cleanup: destroy HLS/DASH instances so they don't hold global
+            // network hooks or keep the player in a fatal state preventing new channels.
+            try {
+                if (hlsRef.current) {
+                    hlsRef.current.destroy();
+                    hlsRef.current = null;
+                }
+            } catch (e) { /* ignore */ }
+            try {
+                if (dashRef.current) {
+                    // shaka Player destroy returns a promise; call and ignore
+                    const d = dashRef.current;
+                    dashRef.current = null;
+                    try { d.destroy?.(); } catch (e) {}
+                }
+            } catch (e) { /* ignore */ }
+
             internalShowError();
+
+            // Auto-close player after showing the error so the UI can mount a fresh
+            // player instance for another channel. Use a short delay to let the error
+            // message display before closing.
+            try {
+                setTimeout(() => {
+                    try { onClose(); } catch (e) { /* ignore */ }
+                }, 1200);
+            } catch (e) {}
         });
 
         // Listen for video element errors specifically
@@ -327,14 +367,22 @@ export default function Player({ url, title, onClose, headers, license, licenseH
                 <div 
                     className={`absolute inset-0 z-40 flex-col items-center justify-center bg-black/80 backdrop-blur-sm transition-all duration-300 ${showErrorOverlay ? 'flex' : 'hidden'}`}
                 >
-                    <div className="flex flex-col items-center space-y-4 animate-in fade-in zoom-in duration-300">
+                    <div className="flex flex-col items-center space-y-4 animate-in fade-in zoom-in duration-300 max-w-md">
                         <div className="p-4 bg-red-500/20 rounded-full">
                             <svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="#ef4444" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line></svg>
                         </div>
-                        <h2 className="text-3xl md:text-5xl font-bold text-white tracking-widest uppercase drop-shadow-[0_0_15px_rgba(239,68,68,0.5)]">
+                        <h2 className="text-3xl md:text-4xl font-bold text-white tracking-widest uppercase drop-shadow-[0_0_15px_rgba(239,68,68,0.5)]">
                             Channel Modar
                         </h2>
-                        <p className="text-white/60 text-sm md:text-base font-medium">Source error or restriction detected!</p>
+                        <p className="text-white/60 text-sm md:text-base font-medium text-center">Source error or restriction detected!</p>
+                        
+                        {/* Error details */}
+                        {errorMessage && (
+                            <div className="w-full p-3 bg-red-500/10 border border-red-500/30 rounded-lg">
+                                <p className="text-xs text-red-200 text-center">{errorMessage}</p>
+                            </div>
+                        )}
+                        
                         <button 
                             onClick={hideError}
                             className="mt-4 px-6 py-2 bg-white/10 hover:bg-white/20 text-white rounded-full transition-all border border-white/10"

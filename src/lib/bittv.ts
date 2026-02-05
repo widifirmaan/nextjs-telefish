@@ -102,21 +102,37 @@ async function getLatestVersion(): Promise<string> {
         });
         if (!res.ok) throw new Error(`GitHub API error: ${res.status}`);
         
-        const data = await res.json() as Array<{ name: string }>;
-        // Find directories (versions) and sort them - they should be numeric folder names
-        const versions = data
-            .filter(item => item.name && /^\d+$/.test(item.name))
-            .map(item => parseInt(item.name, 10))
-            .sort((a, b) => b - a);
+        const data = await res.json() as Array<{ name: string; type?: string }>;
+        
+        // Find all versioned folders (v###, default, etc)
+        const versions: Array<{ num: number; name: string }> = [];
+        
+        for (const item of data) {
+            if (item.type !== 'dir' || !item.name) continue;
+            
+            // Match pattern: v### (e.g., v211, v212, v216)
+            const match = item.name.match(/^v(\d+)(?:[a-z_]*)?$/i);
+            if (match) {
+                versions.push({ num: parseInt(match[1], 10), name: item.name });
+            } else if (item.name === 'default') {
+                // Default version as fallback
+                versions.push({ num: -1, name: 'default' });
+            }
+        }
         
         if (versions.length === 0) {
             console.warn('[Playlist] No versions found, using default');
             return 'default';
         }
         
-        const latest = versions[0].toString();
-        console.log(`[Playlist] Latest version: ${latest}`);
-        return latest;
+        // Sort by version number (highest first)
+        versions.sort((a, b) => b.num - a.num);
+        
+        const latest = versions[0];
+        console.log(`[Playlist] Latest version found: ${latest.name} (v${latest.num})`);
+        console.log(`[Playlist] Available versions: ${versions.slice(0, 5).map(v => v.name).join(', ')}`);
+        
+        return latest.name;
     } catch (e) {
         console.error('[Playlist] Error getting latest version:', e);
         return 'default';
@@ -204,15 +220,24 @@ async function triggerBackgroundUpdate() {
 async function performFetch(): Promise<PlaylistData | null> {
     try {
         const version = await getLatestVersion();
-        console.log(`[Playlist] Fetching version ${version}`);
+        console.log(`[Playlist] 📦 Fetching version: ${version}`);
 
         const idUrl = `${BASE_URL}/${version}/ID.json`;
         const evUrl = `${BASE_URL}/${version}/EV.json`;
+
+        console.log(`[Playlist] Fetching from:`);
+        console.log(`  - Indonesia: ${idUrl}`);
+        console.log(`  - Events: ${evUrl}`);
 
         const [idChannels, evChannels] = await Promise.all([
             fetchAndDecrypt(idUrl),
             fetchAndDecrypt(evUrl)
         ]);
+
+        if (!idChannels && !evChannels) {
+            console.error('[Playlist] ❌ Failed to fetch both ID and EV files');
+            return null;
+        }
 
         const data: PlaylistData = {
             indonesia: idChannels || [],
@@ -220,6 +245,11 @@ async function performFetch(): Promise<PlaylistData | null> {
             version: version,
             lastUpdated: Date.now()
         };
+
+        console.log(`[Playlist] ✅ Successfully fetched:`);
+        console.log(`  - Indonesia: ${(idChannels || []).length} channels`);
+        console.log(`  - Events: ${(evChannels || []).length} channels`);
+        console.log(`  - Total: ${(idChannels || []).length + (evChannels || []).length} channels`);
 
         cachedPlaylist = data;
         lastFetchTime = Date.now();
@@ -232,18 +262,28 @@ async function performFetch(): Promise<PlaylistData | null> {
 
 export async function fetchPlaylist(force: boolean = false): Promise<PlaylistData | null> {
     const now = Date.now();
+    const cacheAgeMs = now - lastFetchTime;
+    const cacheAgeMin = Math.round(cacheAgeMs / 1000 / 60);
     
     // Return cache if fresh enough and not forced
-    if (!force && cachedPlaylist && (now - lastFetchTime < CACHE_DURATION)) {
+    if (!force && cachedPlaylist && (cacheAgeMs < CACHE_DURATION)) {
+        console.log(`[Playlist] ✅ Using cache (${cacheAgeMin} min old, expires in ${5 - cacheAgeMin} min)`);
         return cachedPlaylist;
     }
 
-    // If we have stale cache, trigger background update and return stale data
-    if (!force && cachedPlaylist) {
-        console.log("[Playlist] Returning stale cache, triggering background update...");
+    // If we have stale cache and not forced, trigger background update and return stale data
+    if (!force && cachedPlaylist && cacheAgeMs >= CACHE_DURATION) {
+        console.log(`[Playlist] ⏳ Cache expired (${cacheAgeMin} min old), returning stale data + background refresh`);
         triggerBackgroundUpdate();
         return cachedPlaylist;
     }
 
+    // Force refresh or no cache
+    if (force) {
+        console.log('[Playlist] 🔄 Force refresh requested');
+    } else {
+        console.log('[Playlist] 📥 No cache, fetching fresh data');
+    }
+    
     return performFetch();
 }
