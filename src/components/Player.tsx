@@ -83,23 +83,40 @@ export default function Player({ url, title, onClose, headers, license, licenseH
         let isActive = true;
         const isWebKit = typeof navigator !== 'undefined' && /AppleWebKit/.test(navigator.userAgent) && !/Chrome/.test(navigator.userAgent);
 
-        // Determine stream type: prioritize explicit 'type' prop, then URL pattern, then 'jenis' property
-        let streamType = 'mpd';
-        if (type && (type.includes('dash') || type === 'mpd')) {
+        // Determine stream type with WebKit-friendly fallback.
+        // On WebKit (Safari/iOS) prefer HLS if any HLS URL is available (from license/url/actualStreamUrl).
+        let streamType = 'm3u8';
+        let selectedUrl = actualStreamUrl;
+        const hasHls = (u?: string) => !!(u && (u.includes('.m3u8') || u.toLowerCase().includes('m3u8')));
+        const hlsCandidate = hasHls(actualStreamUrl) ? actualStreamUrl : (hasHls(url) ? url : (hasHls(license) ? license : null));
+
+        if (isWebKit && hlsCandidate) {
+            streamType = 'm3u8';
+            selectedUrl = hlsCandidate as string;
+            console.log('[Player] WebKit detected - preferring HLS candidate');
+        } else if (type && (type.includes('dash') || type === 'mpd')) {
             streamType = 'mpd';
+            selectedUrl = actualStreamUrl;
             console.log('[Player] Using explicit type prop (DASH):', type);
         } else if (actualStreamUrl.includes('.mpd')) {
             streamType = 'mpd';
+            selectedUrl = actualStreamUrl;
             console.log('[Player] Detected from URL: .mpd extension');
+        } else if (hasHls(actualStreamUrl)) {
+            streamType = 'm3u8';
+            selectedUrl = actualStreamUrl;
+            console.log('[Player] Detected from URL: .m3u8 extension');
         } else {
             streamType = 'm3u8';
-            console.log('[Player] Default to HLS: .m3u8');
+            selectedUrl = actualStreamUrl;
+            console.log('[Player] Defaulting to HLS');
         }
-        console.log('[Player] Stream Type Detection:', { 
-            url: actualStreamUrl, 
+
+        console.log('[Player] Stream Type Detection:', {
+            selectedUrl,
             detectedType: streamType,
             typeFromProps: type,
-            isMPD: actualStreamUrl.includes('.mpd'),
+            isMPD: selectedUrl.includes('.mpd'),
             urlLicenseUsedAsStream: license && (license.startsWith('http://') || license.startsWith('https://'))
         });
         
