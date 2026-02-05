@@ -82,7 +82,7 @@ export default function Player({ url, title, onClose, headers, license, licenseH
             volume: 0.7,
             isLive: true,
             muted: false,
-            autoplay: false,
+            autoplay: true,
             autoSize: true,
             autoMini: true,
             setting: true,
