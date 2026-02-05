@@ -17,9 +17,10 @@ async function handleRequest(request: NextRequest) {
     try {
         const headers: Record<string, string> = {
             'User-Agent': userAgent,
-            'Referer': referer,
-            'Origin': origin,
         };
+
+        if (referer && referer !== 'none') headers['Referer'] = referer;
+        if (origin && origin !== 'none') headers['Origin'] = origin;
 
         const incomingRange = request.headers.get('range');
         if (incomingRange) headers['Range'] = incomingRange;
