@@ -5,7 +5,11 @@ export const dynamic = 'force-dynamic'; // disable static caching
 
 export async function GET(request: Request) {
     try {
-        const playlist = await fetchPlaylist();
+        const { searchParams } = new URL(request.url);
+        const forceRefresh = searchParams.get('refresh') === 'true';
+        
+        console.log(`[Playlist API] Force refresh: ${forceRefresh}`);
+        const playlist = await fetchPlaylist(forceRefresh);
 
         if (!playlist) {
             return NextResponse.json(
