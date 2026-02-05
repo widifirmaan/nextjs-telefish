@@ -72,21 +72,20 @@ export default function Player({ url, title, onClose, headers, license, licenseH
 
     useEffect(() => {
         if (!artRef.current) return;
-
+        let isActive = true;
         const isWebKit = typeof navigator !== 'undefined' && /AppleWebKit/.test(navigator.userAgent) && !/Chrome/.test(navigator.userAgent);
 
         const art = new Artplayer({
             container: artRef.current,
             url: url,
             title: title,
-            volume: 0.7,
+            volume: 1,
             isLive: true,
             muted: false,
             autoplay: true,
             autoSize: true,
             autoMini: true,
             setting: true,
-            loop: true,
             flip: true,
             playbackRate: true,
             aspectRatio: true,
@@ -159,9 +158,22 @@ export default function Player({ url, title, onClose, headers, license, licenseH
                     const shaka = await import('shaka-player') as any;
                     shaka.polyfill.installAll();
                     if (!shaka.Player.isBrowserSupported()) return;
-                    if ((window as any).__shakaPlayer) await (window as any).__shakaPlayer.destroy();
+                    if (!isActive) return;
+
+                    if (dashRef.current) {
+                        const prevPlayer = dashRef.current;
+                        dashRef.current = null;
+                        await prevPlayer.destroy();
+                    }
+                    if (!isActive) return;
+
                     const player = new shaka.Player();
                     await player.attach(video);
+                    if (!isActive) {
+                        await player.destroy();
+                        return;
+                    }
+                    dashRef.current = player;
                     (window as any).__shakaPlayer = player;
                     const drmType = type?.includes('clearkey') ? 'clearkey' : undefined;
                     const proxiedManifestUrl = getProxyUrl(url, drmType);
@@ -199,9 +211,10 @@ export default function Player({ url, title, onClose, headers, license, licenseH
                         player.configure({ drm: { servers: { 'com.widevine.alpha': license } } });
                     }
                     try { 
+                        if (!isActive) return;
                         await player.load(proxiedManifestUrl);
                         // Attempt muted autoplay on WebKit after manifest load
-                        if (isWebKit) {
+                        if (isActive && isWebKit) {
                             try {
                                 video.muted = true;
                                 video.setAttribute('playsinline', '');
@@ -210,7 +223,7 @@ export default function Player({ url, title, onClose, headers, license, licenseH
                             } catch (e) { /* ignore */ }
                         }
                     } catch (e) {
-                        art.emit('error', e);
+                        if (isActive) art.emit('error', e);
                     }
                 },
             },
@@ -229,7 +242,7 @@ export default function Player({ url, title, onClose, headers, license, licenseH
         art.loading.show = false; // Force hide initially
 
         art.on('play', () => {
-            hasStartedPlaying = true;
+            hasStartedPlaying = false;
             internalHideError();
         });
 
@@ -251,13 +264,22 @@ export default function Player({ url, title, onClose, headers, license, licenseH
         art.video.addEventListener('error', internalShowError);
 
         return () => {
+            isActive = false;
             art.video.removeEventListener('error', internalShowError);
+            
+            // Immediate stop
+            try {
+                art.video.pause();
+                art.video.src = "";
+                art.video.load();
+            } catch (e) {}
+
             if (hlsRef.current) {
                 hlsRef.current.destroy();
                 hlsRef.current = null;
             }
             if (dashRef.current) {
-                dashRef.current.reset();
+                dashRef.current.destroy();
                 dashRef.current = null;
             }
             if (art && art.destroy) {

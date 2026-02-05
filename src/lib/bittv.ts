@@ -8,13 +8,15 @@ export interface Channel {
     [key: string]: any;
 }
 
-export interface PlaylistResponse {
-    country_name: string;
-    country: string;
-    info: Channel[];
-}
+const BASE_URL = "https://raw.githubusercontent.com/brodatv1/lite/main";
+const GITHUB_API_URL = "https://api.github.com/repos/brodatv1/lite/contents/";
 
-const PLAYLIST_URL = "https://raw.githubusercontent.com/brodatv1/lite/main/v214/ID.json";
+export interface PlaylistData {
+    indonesia: Channel[];
+    event: Channel[];
+    version: string;
+    lastUpdated: number;
+}
 
 function reverse(s: string): string {
     return s.split('').reverse().join('');
@@ -75,30 +77,100 @@ function decryptPlaylist(encryptedInfo: string): string {
 }
 
 // Simple in-memory cache
-let cachedPlaylist: PlaylistResponse | null = null;
+let cachedPlaylist: PlaylistData | null = null;
 let lastFetchTime = 0;
 const CACHE_DURATION = 1000 * 60 * 5; // 5 minutes
 
-export async function fetchPlaylist(): Promise<PlaylistResponse | null> {
-    const now = Date.now();
-    if (cachedPlaylist && (now - lastFetchTime < CACHE_DURATION)) {
-        return cachedPlaylist;
-    }
-
+async function getLatestVersion(): Promise<string> {
     try {
-        console.log(`Fetching playlist from ${PLAYLIST_URL}`);
-        const res = await fetch(PLAYLIST_URL, { next: { revalidate: 300 } });
-        if (!res.ok) throw new Error(`Failed to fetch: ${res.status}`);
+        const res = await fetch(GITHUB_API_URL, { next: { revalidate: 3600 } });
+        if (!res.ok) return "v216"; // Fallback to a known version
 
+        const contents = await res.json();
+        const versions = contents
+            .filter((item: any) => item.type === "dir" && /^v\d+/.test(item.name))
+            .map((item: any) => item.name)
+            .sort((a: string, b: string) => {
+                const numA = parseInt(a.replace(/\D/g, ''));
+                const numB = parseInt(b.replace(/\D/g, ''));
+                return numB - numA;
+            });
+
+        return versions[0] || "v216";
+    } catch (e) {
+        console.error("Error fetching latest version:", e);
+        return "v216";
+    }
+}
+
+async function fetchAndDecrypt(url: string): Promise<Channel[] | null> {
+    try {
+        const res = await fetch(url, { cache: 'no-store' });
+        if (!res.ok) return null;
         const text = await res.text();
         const decrypted = decryptPlaylist(text);
-
-        cachedPlaylist = JSON.parse(decrypted);
-        lastFetchTime = now;
-
-        return cachedPlaylist;
+        const parsed = JSON.parse(decrypted);
+        return parsed.info || [];
     } catch (e) {
-        console.error("Error fetching playlist:", e);
+        console.error(`Error fetching/decrypting ${url}:`, e);
         return null;
     }
+}
+
+let isUpdating = false;
+async function triggerBackgroundUpdate() {
+    if (isUpdating) return;
+    isUpdating = true;
+    try {
+        await performFetch();
+    } finally {
+        isUpdating = false;
+    }
+}
+
+async function performFetch(): Promise<PlaylistData | null> {
+    try {
+        const version = await getLatestVersion();
+        console.log(`Fetching playlist version ${version}`);
+
+        const idUrl = `${BASE_URL}/${version}/ID.json`;
+        const evUrl = `${BASE_URL}/${version}/EV.json`;
+
+        const [idChannels, evChannels] = await Promise.all([
+            fetchAndDecrypt(idUrl),
+            fetchAndDecrypt(evUrl)
+        ]);
+
+        const data: PlaylistData = {
+            indonesia: idChannels || [],
+            event: evChannels || [],
+            version: version,
+            lastUpdated: Date.now()
+        };
+
+        cachedPlaylist = data;
+        lastFetchTime = Date.now();
+        return data;
+    } catch (e) {
+        console.error("Error performing fetch:", e);
+        return null;
+    }
+}
+
+export async function fetchPlaylist(force: boolean = false): Promise<PlaylistData | null> {
+    const now = Date.now();
+    
+    // Return cache if fresh enough and not forced
+    if (!force && cachedPlaylist && (now - lastFetchTime < CACHE_DURATION)) {
+        return cachedPlaylist;
+    }
+
+    // If we have stale cache, trigger background update and return stale data
+    if (!force && cachedPlaylist) {
+        console.log("Returning stale cache, triggering background update...");
+        triggerBackgroundUpdate();
+        return cachedPlaylist;
+    }
+
+    return performFetch();
 }
