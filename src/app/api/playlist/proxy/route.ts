@@ -3,7 +3,7 @@ import { NextRequest, NextResponse } from 'next/server';
 export const runtime = 'edge';
 export const dynamic = 'force-dynamic';
 
-export async function GET(request: NextRequest) {
+async function handleRequest(request: NextRequest) {
     const searchParams = request.nextUrl.searchParams;
     const targetUrl = searchParams.get('url');
     const referer = searchParams.get('referer') || 'https://duktek.id/';
@@ -27,11 +27,11 @@ export async function GET(request: NextRequest) {
         const incomingAccept = request.headers.get('accept');
         if (incomingAccept) headers['Accept'] = incomingAccept;
 
+        // Passthrough original method (important for HEAD requests)
         const response = await fetch(targetUrl, {
+            method: request.method,
             headers: headers,
         });
-
-
 
         const newHeaders = new Headers(response.headers);
         newHeaders.delete('content-encoding');
@@ -49,7 +49,8 @@ export async function GET(request: NextRequest) {
         const isMpd = contentType.includes('application/dash+xml') ||
             targetUrl.includes('.mpd');
 
-        if (isM3u8 || isMpd) {
+        // Only process manifest text for GET requests
+        if ((isM3u8 || isMpd) && request.method === 'GET') {
             try {
                 // Since we are modifying the manifest text, the original Content-Length is invalid
                 newHeaders.delete('content-length');
@@ -66,10 +67,6 @@ export async function GET(request: NextRequest) {
                         try { return new URL(trimmed, baseUrl).toString(); } catch (e) { return trimmed; }
                     }).join('\n');
                 } else if (isMpd) {
-                    // For MPD, we need to rewrite BaseURL to go through our proxy
-                    // This ensures all segment requests are CORS-enabled
-                    const proxyBaseUrl = `/api/playlist/proxy?url=${encodeURIComponent(baseUrl)}`;
-                    
                     if (!text.includes('<BaseURL>')) {
                         const mpdMatch = text.match(/<MPD[^>]*>/i);
                         if (mpdMatch) {
@@ -120,6 +117,14 @@ export async function GET(request: NextRequest) {
     }
 }
 
+export async function GET(request: NextRequest) {
+    return handleRequest(request);
+}
+
+export async function HEAD(request: NextRequest) {
+    return handleRequest(request);
+}
+
 export async function OPTIONS() {
     return new NextResponse(null, {
         status: 200,
@@ -127,6 +132,7 @@ export async function OPTIONS() {
             'Access-Control-Allow-Origin': '*',
             'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS',
             'Access-Control-Allow-Headers': 'Content-Type, Range, User-Agent, X-Requested-With',
+            'Access-Control-Expose-Headers': 'Content-Length, Content-Range, Accept-Ranges',
         },
     });
 }
