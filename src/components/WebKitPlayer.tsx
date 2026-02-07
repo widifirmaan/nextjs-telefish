@@ -61,15 +61,6 @@ export default function WebKitPlayer({
         video.src = proxyUrl;
         video.load();
 
-        const playPromise = video.play();
-        if (playPromise !== undefined) {
-            playPromise.catch(err => {
-                if (err.name !== 'AbortError') {
-                    console.warn("[WebKitPlayer] Playback failed:", err);
-                }
-            });
-        }
-
         const handlePlay = () => {
             setRetryCount(0); // Reset on success
             if (onDebugInfo) {
@@ -141,8 +132,6 @@ export default function WebKitPlayer({
                     ref={videoRef}
                     className="w-full h-full"
                     controls
-                    autoPlay
-                    muted
                     playsInline
                 />
 
