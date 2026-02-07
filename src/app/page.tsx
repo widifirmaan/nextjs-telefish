@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useMemo } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Search, Play, Tv2, Globe, Filter, Heart, History, X, RefreshCw, Calendar, Flag } from 'lucide-react';
+import { Search, Play, Tv2, Globe, Filter, Heart, History, X, RefreshCw, Calendar, Flag, Bug, Download } from 'lucide-react';
 import Player from '@/components/Player';
 import clsx from 'clsx';
 
@@ -28,6 +28,18 @@ interface PlaylistData {
   lastUpdated: number;
 }
 
+interface DebugResult {
+  id: string;
+  name: string;
+  originalUrl: string;
+  proxyUrl: string;
+  streamType: string;
+  drmKeys?: string;
+  playMethod: string;
+  error?: string | null;
+  status: 'pending' | 'ok' | 'error';
+}
+
 export default function Home() {
   const [playlist, setPlaylist] = useState<PlaylistData | null>(null);
   const [search, setSearch] = useState("");
@@ -35,22 +47,59 @@ export default function Home() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [activeCategory, setActiveCategory] = useState<'indonesia' | 'event'>('indonesia');
+  
+  // Progress bar state
+  const [updateProgress, setUpdateProgress] = useState({ 
+    active: false, 
+    stage: '', 
+    percent: 0 
+  });
 
   // User Preferences
   const [favorites, setFavorites] = useState<string[]>([]);
   const [recents, setRecents] = useState<Channel[]>([]);
 
+  // Debug State
+  const [debugActive, setDebugActive] = useState(false);
+  const [debugResults, setDebugResults] = useState<DebugResult[]>([]);
+  const [debugIndex, setDebugIndex] = useState(-1);
+  const [debugTimeout, setDebugTimeout] = useState<NodeJS.Timeout | null>(null);
+
   const loadPlaylist = async (force: boolean = false) => {
-    if (force) setRefreshing(true);
+    if (force) {
+      setRefreshing(true);
+      setUpdateProgress({ active: true, stage: 'Connecting to server...', percent: 10 });
+    }
     try {
+      // Simulate progress stages
+      if (force) {
+        setTimeout(() => setUpdateProgress(p => p.active ? { ...p, stage: 'Fetching version info...', percent: 25 } : p), 300);
+        setTimeout(() => setUpdateProgress(p => p.active ? { ...p, stage: 'Downloading Indonesia channels...', percent: 40 } : p), 800);
+        setTimeout(() => setUpdateProgress(p => p.active ? { ...p, stage: 'Downloading Event channels...', percent: 60 } : p), 1500);
+        setTimeout(() => setUpdateProgress(p => p.active ? { ...p, stage: 'Decrypting playlist...', percent: 80 } : p), 2500);
+      }
+      
       const res = await fetch(`/api/playlist${force ? '?refresh=true' : ''}`);
       if (!res.ok) throw new Error("Network response was not ok");
+      
+      if (force) {
+        setUpdateProgress({ active: true, stage: 'Processing data...', percent: 95 });
+      }
+      
       const data = await res.json();
       if (data) {
         setPlaylist(data);
+        if (force) {
+          setUpdateProgress({ active: true, stage: 'Complete!', percent: 100 });
+          setTimeout(() => setUpdateProgress({ active: false, stage: '', percent: 0 }), 800);
+        }
       }
     } catch (err) {
       console.error(err);
+      if (force) {
+        setUpdateProgress({ active: true, stage: 'Update failed!', percent: 100 });
+        setTimeout(() => setUpdateProgress({ active: false, stage: '', percent: 0 }), 1500);
+      }
     } finally {
       setLoading(false);
       setRefreshing(false);
@@ -99,6 +148,94 @@ export default function Home() {
       return [channel, ...filtered].slice(0, 5);
     });
   };
+
+  // Debug Methods
+  const startDebug = () => {
+    if (!playlist) return;
+    const all = [...playlist.indonesia, ...playlist.event];
+    setDebugResults(all.map(ch => ({
+      id: ch.id,
+      name: ch.name,
+      originalUrl: '',
+      proxyUrl: '',
+      streamType: '',
+      playMethod: '',
+      status: 'pending'
+    })));
+    setDebugActive(true);
+    setDebugIndex(0);
+  };
+
+  const stopDebug = () => {
+    setDebugActive(false);
+    setDebugIndex(-1);
+    setSelectedChannel(null);
+    if (debugTimeout) {
+      clearTimeout(debugTimeout);
+      setDebugTimeout(null);
+    }
+  };
+
+  const downloadDebugReport = () => {
+    const header = `BITTV CHANNEL DEBUG REPORT\nGenerated: ${new Date().toLocaleString()}\n${'='.repeat(50)}\n\n`;
+    const body = debugResults.map((r, i) => {
+      let text = `${i + 1}. [${r.status.toUpperCase()}] ${r.name} (${r.id})\n`;
+      text += `   - Playback Method: ${r.playMethod || 'N/A'}\n`;
+      text += `   - Stream Type: ${r.streamType || 'N/A'}\n`;
+      text += `   - Proxy URL: ${r.proxyUrl || 'N/A'}\n`;
+      if (r.drmKeys) text += `   - DRM Keys: ${r.drmKeys}\n`;
+      if (r.error) text += `   - ERROR: ${r.error}\n`;
+      text += `\n`;
+      return text;
+    }).join('');
+
+    const blob = new Blob([header + body], { type: 'text/plain' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `bittv-debug-report-${new Date().toISOString().split('T')[0]}.txt`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  };
+
+  const handleDebugInfo = (info: any) => {
+    if (!debugActive || debugIndex < 0) return;
+    
+    setDebugResults(prev => {
+      const next = [...prev];
+      if (next[debugIndex]) {
+        next[debugIndex] = {
+          ...next[debugIndex],
+          ...info,
+          status: info.error ? 'error' : 'ok'
+        };
+      }
+      return next;
+    });
+  };
+
+  // Handle Debug Cycling
+  useEffect(() => {
+    if (debugActive && debugIndex >= 0) {
+      const all = playlist ? [...playlist.indonesia, ...playlist.event] : [];
+      if (debugIndex < all.length) {
+        setSelectedChannel(all[debugIndex]);
+        
+        const timer = setTimeout(() => {
+          setDebugIndex(prev => prev + 1);
+        }, 6000); // 6 seconds total (1s buffer for load + 5s play)
+        
+        setDebugTimeout(timer);
+        return () => clearTimeout(timer);
+      } else {
+        setDebugActive(false);
+        setDebugIndex(-1);
+        setSelectedChannel(null);
+      }
+    }
+  }, [debugActive, debugIndex, playlist]);
 
   const allChannels = useMemo(() => {
     if (!playlist) return [];
@@ -171,7 +308,59 @@ export default function Home() {
                >
                  <RefreshCw className={clsx("w-4 h-4 text-primary", refreshing && "animate-spin")} />
                </button>
+                <button
+                  onClick={startDebug}
+                  disabled={debugActive || refreshing}
+                  className={clsx(
+                    "p-2 rounded-full glass hover:bg-white/10 transition-all border border-white/5 group",
+                    (debugActive || refreshing) && "opacity-50 cursor-not-allowed"
+                  )}
+                  title="Debug All Channels"
+                >
+                  <Bug className={clsx("w-4 h-4 text-primary", debugActive && "animate-pulse")} />
+                </button>
           </div>
+          
+          {/* Progress Bar */}
+          <AnimatePresence>
+            {updateProgress.active && (
+              <motion.div
+                initial={{ opacity: 0, y: -10, height: 0 }}
+                animate={{ opacity: 1, y: 0, height: 'auto' }}
+                exit={{ opacity: 0, y: -10, height: 0 }}
+                className="w-full max-w-md mx-auto mt-4"
+              >
+                <div className="glass rounded-xl p-4 border border-primary/20">
+                  {/* Stage Text */}
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="text-xs font-medium text-primary animate-pulse">
+                      {updateProgress.stage}
+                    </span>
+                    <span className="text-xs font-bold text-primary">
+                      {updateProgress.percent}%
+                    </span>
+                  </div>
+                  
+                  {/* Progress Track */}
+                  <div className="h-2 bg-white/5 rounded-full overflow-hidden">
+                    <motion.div
+                      initial={{ width: 0 }}
+                      animate={{ width: `${updateProgress.percent}%` }}
+                      transition={{ duration: 0.3, ease: "easeOut" }}
+                      className={clsx(
+                        "h-full rounded-full transition-colors",
+                        updateProgress.stage === 'Complete!' 
+                          ? "bg-green-500" 
+                          : updateProgress.stage === 'Update failed!' 
+                            ? "bg-red-500" 
+                            : "bg-gradient-to-r from-primary via-primary/80 to-primary"
+                      )}
+                    />
+                  </div>
+                </div>
+              </motion.div>
+            )}
+          </AnimatePresence>
         </div>
 
         {/* Search Bar */}
@@ -297,9 +486,23 @@ export default function Home() {
           license={selectedChannel.url_license}
           licenseHeader={selectedChannel.header_license}
           type={selectedChannel.jenis}
-          onClose={() => setSelectedChannel(null)}
-          channels={allChannels}
-          currentIndex={allChannels.findIndex(ch => ch.id === selectedChannel.id)}
+          onClose={() => {
+            if (debugActive) stopDebug();
+            else setSelectedChannel(null);
+          }}
+          onDebugInfo={handleDebugInfo}
+          channels={(() => {
+            if (!playlist) return [];
+            // Find which group the channel belongs to
+            const isInIndo = playlist.indonesia.some(ch => ch.id === selectedChannel.id);
+            return isInIndo ? playlist.indonesia : playlist.event;
+          })()}
+          currentIndex={(() => {
+            if (!playlist) return -1;
+            const isInIndo = playlist.indonesia.some(ch => ch.id === selectedChannel.id);
+            const list = isInIndo ? playlist.indonesia : playlist.event;
+            return list.findIndex(ch => ch.id === selectedChannel.id);
+          })()}
           onChannelChange={(channel, index) => {
             setSelectedChannel(channel);
             // Add to recents
@@ -310,6 +513,112 @@ export default function Home() {
           }}
         />
       )}
+
+      {/* Debug Results Modal */}
+      <AnimatePresence>
+        {debugResults.length > 0 && !debugActive && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/90 backdrop-blur-md"
+          >
+            <div className="bg-[#1a1a1a] border border-white/10 rounded-2xl w-full max-w-4xl max-h-[80vh] flex flex-col overflow-hidden shadow-2xl">
+              <div className="p-6 border-b border-white/10 flex items-center justify-between">
+                <div className="flex items-center space-x-3">
+                  <Bug className="text-primary w-6 h-6" />
+                  <h2 className="text-xl font-bold">Channel Debug Report</h2>
+                </div>
+                <button 
+                  onClick={() => setDebugResults([])}
+                  className="p-2 hover:bg-white/10 rounded-full transition-colors"
+                >
+                  <X className="w-6 h-6" />
+                </button>
+              </div>
+
+              <div className="flex-1 overflow-y-auto p-6">
+                <div className="grid gap-4">
+                  {debugResults.map((result, idx) => (
+                    <div 
+                      key={`${result.id}-${idx}`}
+                      className={clsx(
+                        "p-4 rounded-xl border transition-all",
+                        result.status === 'ok' ? "bg-green-500/10 border-green-500/30" : 
+                        result.status === 'error' ? "bg-red-500/10 border-red-500/30" : 
+                        "bg-white/5 border-white/10"
+                      )}
+                    >
+                      <div className="flex items-center justify-between mb-3">
+                        <div className="flex items-center space-x-2">
+                          <span className="font-bold">{result.name}</span>
+                          <span className="text-[10px] px-2 py-0.5 rounded-full bg-white/10 text-gray-400 font-mono italic">
+                            {result.id}
+                          </span>
+                        </div>
+                        <span className={clsx(
+                          "text-xs font-bold uppercase tracking-wider px-2 py-1 rounded",
+                          result.status === 'ok' ? "text-green-400 bg-green-400/20" : 
+                          result.status === 'error' ? "text-red-400 bg-red-400/20" : 
+                          "text-gray-400 bg-gray-400/20"
+                        )}>
+                          {result.status}
+                        </span>
+                      </div>
+
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs font-mono">
+                        <div className="space-y-1">
+                          <p className="text-gray-500 uppercase text-[9px]">Playback Method</p>
+                          <p className="text-gray-200">{result.playMethod || 'N/A'}</p>
+                          
+                          <p className="text-gray-500 uppercase text-[9px] mt-2">Stream Type</p>
+                          <p className="text-gray-200">{result.streamType || 'N/A'}</p>
+                        </div>
+                        <div className="space-y-1">
+                          <p className="text-gray-500 uppercase text-[9px]">Proxy URL</p>
+                          <p className="text-gray-200 break-all truncate hover:whitespace-normal cursor-help" title={result.proxyUrl}>
+                            {result.proxyUrl || 'N/A'}
+                          </p>
+                        </div>
+                      </div>
+
+                      {result.drmKeys && (
+                        <div className="mt-3 p-2 bg-black/40 rounded border border-white/5 font-mono text-[10px]">
+                          <p className="text-primary/70 mb-1 uppercase text-[8px]">DRM Keys</p>
+                          <code className="text-primary break-all">{result.drmKeys}</code>
+                        </div>
+                      )}
+
+                      {result.error && (
+                        <div className="mt-3 p-2 bg-red-500/20 rounded border border-red-500/30 text-red-200 text-[10px]">
+                          <p className="uppercase text-[8px] font-bold mb-1">Diagnostic Error</p>
+                          {result.error}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <div className="p-6 border-t border-white/10 bg-black/20 flex justify-end space-x-4">
+                <button 
+                  onClick={downloadDebugReport}
+                  className="px-6 py-2 bg-white/10 hover:bg-white/20 text-white rounded-full font-bold transition-all flex items-center space-x-2"
+                >
+                  <Download className="w-4 h-4" />
+                  <span>Download .txt</span>
+                </button>
+                <button 
+                  onClick={() => setDebugResults([])}
+                  className="px-6 py-2 bg-primary hover:bg-primary/80 text-white rounded-full font-bold transition-all"
+                >
+                  Close Report
+                </button>
+              </div>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </main>
   );
 }

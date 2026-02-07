@@ -5,8 +5,39 @@ import Artplayer from 'artplayer';
 import Hls from 'hls.js';
 
 // ============================================
+// Configuration Constants (Based on BitTV APK v2.1.5)
+// ============================================
+
+const BITTV_CONFIG = {
+    // Firefox-based User-Agent matching APK pattern
+    USER_AGENT: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:119.0) Gecko/20100101 Firefox/119.0',
+    // Referer format from APK: https://duktek.id/?device={DEVICE}&is_genuine={GENUINE}
+    REFERER: 'https://duktek.id/?device=BitTVWeb&is_genuine=true',
+    // Origin from APK
+    ORIGIN: 'https://duktek.id',
+    // Android mode User-Agent
+    ANDROID_USER_AGENT: 'Mozilla/5.0 (Linux; Android 13; Pixel 7 Build/TQ1A.231105.002) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Mobile Safari/537.36',
+    ANDROID_REFERER: 'https://duktek.id/?device=BitTVAndroid&is_genuine=true',
+} as const;
+
+// Stream types supported by APK
+type StreamType = 'hls' | 'dash' | 'dash-clearkey' | 'dash-widevine' | 'ts';
+
+// Android/Emtek channels that need special headers
+const ANDROID_CHANNELS = ['indosiar', 'sctv', 'moji', 'mentari', 'bri', 'liga 1', 'piala', 'superleague', 'vidio'];
+
+// ============================================
 // Type Definitions
 // ============================================
+
+interface DebugInfo {
+    originalUrl: string;
+    proxyUrl: string;
+    streamType: string;
+    drmKeys?: string;
+    playMethod: 'hls' | 'shaka' | 'native';
+    error?: string | null;
+}
 
 interface PlayerProps {
     url: string;
@@ -16,10 +47,10 @@ interface PlayerProps {
     license?: string;
     licenseHeader?: string;
     type?: string;
-    // Channel navigation props
     channels?: ChannelInfo[];
     currentIndex?: number;
     onChannelChange?: (channel: ChannelInfo, index: number) => void;
+    onDebugInfo?: (info: DebugInfo) => void;
 }
 
 interface ChannelInfo {
@@ -34,43 +65,45 @@ interface ChannelInfo {
     tagline?: string;
 }
 
-interface ErrorState {
-    show: boolean;
-    message: string | null;
-}
-
-interface StreamDetectionResult {
-    type: 'm3u8' | 'mpd';
-    url: string;
+interface PlayerState {
+    isLoading: boolean;
+    hasError: boolean;
+    errorMessage: string | null;
+    hasStartedPlaying: boolean;
+    isTransitioning: boolean;
 }
 
 // ============================================
-// Helper Functions (Extracted to avoid duplication)
+// Utility Functions
 // ============================================
 
-/**
- * Setup WebKit/Safari autoplay with muted video
- * Extracted to avoid code duplication (was repeated 3x)
- */
-const setupWebKitAutoplay = (video: HTMLMediaElement): void => {
-    try {
-        video.muted = true;
-        video.setAttribute('playsinline', '');
-        video.setAttribute('webkit-playsinline', '');
-    } catch (e) {
-        console.warn('[Player] Failed to setup WebKit autoplay:', e);
-    }
+/** Check if URL is HTTP/HTTPS */
+const isHttpUrl = (str: string): boolean => 
+    str?.startsWith('http://') || str?.startsWith('https://');
+
+/** Check if browser is Safari/WebKit */
+const isSafari = (): boolean => {
+    if (typeof navigator === 'undefined') return false;
+    const ua = navigator.userAgent;
+    return /AppleWebKit/.test(ua) && /Safari/.test(ua) && !/Chrome/.test(ua);
 };
 
-/**
- * Convert base64 to hex string
- * Used for clearkey DRM key conversion
- */
+/** Check if content requires DRM based on type and license */
+const isDrmContent = (type?: string, license?: string): boolean => 
+    Boolean(type?.includes('dash') || type?.includes('widevine') || type?.includes('clearkey') || (license && isHttpUrl(license)));
+
+/** Check if URL is HLS stream */
+const isHlsStream = (url?: string): boolean => 
+    url?.includes('.m3u8') || url?.toLowerCase().includes('m3u8') || false;
+
+/** Check if URL is DASH stream */
+const isDashStream = (url?: string): boolean => 
+    url?.includes('.mpd') || false;
+
+/** Convert base64 to hex string for ClearKey */
 const base64ToHex = (base64: string): string => {
     let normalized = base64.replace(/-/g, '+').replace(/_/g, '/');
-    while (normalized.length % 4 !== 0) {
-        normalized += '=';
-    }
+    while (normalized.length % 4 !== 0) normalized += '=';
     const binary = atob(normalized);
     let hex = '';
     for (let i = 0; i < binary.length; i++) {
@@ -79,23 +112,113 @@ const base64ToHex = (base64: string): string => {
     return hex;
 };
 
-/**
- * Check if URL is HTTP/HTTPS stream
- */
-const isHttpUrl = (str: string): boolean => {
-    return str.startsWith('http://') || str.startsWith('https://');
-};
+/** Check if channel needs Android mode headers */
+const needsAndroidMode = (title: string): boolean => 
+    ANDROID_CHANNELS.some(k => title.toLowerCase().includes(k));
 
-/**
- * Check if URL contains HLS stream
- */
-const hasHlsExtension = (url?: string): boolean => {
-    if (!url) return false;
-    return url.includes('.m3u8') || url.toLowerCase().includes('m3u8');
+/** Get header value case-insensitively */
+const getHeaderValue = (headers: Record<string, string> | undefined, key: string): string | undefined => {
+    if (!headers) return undefined;
+    const foundKey = Object.keys(headers).find(k => k.toLowerCase() === key.toLowerCase());
+    return foundKey ? headers[foundKey] : undefined;
 };
 
 // ============================================
-// Component
+// Proxy URL Builder
+// ============================================
+
+const buildProxyUrl = (
+    targetUrl: string,
+    options: {
+        headers?: Record<string, string>;
+        drm?: string;
+        androidMode?: boolean;
+    } = {}
+): string => {
+    const { headers, drm, androidMode = false } = options;
+    const params = new URLSearchParams({ url: targetUrl });
+
+    if (drm) params.append('drm', drm);
+    if (androidMode) params.append('android', '1');
+
+    // Set headers based on mode
+    if (androidMode) {
+        params.set('user_agent', BITTV_CONFIG.ANDROID_USER_AGENT);
+        params.set('referer', BITTV_CONFIG.ANDROID_REFERER);
+        params.set('origin', BITTV_CONFIG.ORIGIN);
+    } else {
+        // Use playlist headers if valid, otherwise use defaults
+        const referer = getHeaderValue(headers, 'referer');
+        const origin = getHeaderValue(headers, 'origin');
+        const userAgent = getHeaderValue(headers, 'user-agent');
+
+        params.set('user_agent', userAgent || BITTV_CONFIG.USER_AGENT);
+        params.set('referer', (referer && referer !== 'none') ? referer : BITTV_CONFIG.REFERER);
+        params.set('origin', (origin && origin !== 'none') ? origin : BITTV_CONFIG.ORIGIN);
+    }
+
+    return `/api/playlist/proxy?${params.toString()}`;
+};
+
+// ============================================
+// Stream Type Detector
+// ============================================
+
+const detectStreamType = (url: string, type?: string, license?: string): { streamType: StreamType; streamUrl: string } => {
+    // Explicit type from props
+    if (type === 'dash-clearkey') return { streamType: 'dash-clearkey', streamUrl: url };
+    if (type === 'dash-widevine') return { streamType: 'dash-widevine', streamUrl: url };
+    if (type?.includes('dash') || type === 'mpd') return { streamType: 'dash', streamUrl: url };
+    
+    // Widevine detection via license URL
+    if (license && isHttpUrl(license) && !type?.includes('clearkey')) {
+        return { streamType: 'dash-widevine', streamUrl: url };
+    }
+
+    // URL-based detection
+    if (isDashStream(url)) return { streamType: 'dash', streamUrl: url };
+    if (isHlsStream(url)) return { streamType: 'hls', streamUrl: url };
+
+    // Default to HLS
+    return { streamType: 'hls', streamUrl: url };
+};
+
+// ============================================
+// DRM Configuration Builder
+// ============================================
+
+const buildDrmConfig = (type?: string, license?: string): { clearKeys?: Record<string, string>; widevineUrl?: string } => {
+    const config: { clearKeys?: Record<string, string>; widevineUrl?: string } = {};
+
+    // ClearKey DRM
+    if (type === 'dash-clearkey' && license && !isHttpUrl(license)) {
+        try {
+            let normalized = license.replace(/-/g, '+').replace(/_/g, '/');
+            while (normalized.length % 4 !== 0) normalized += '=';
+            const licenseData = JSON.parse(atob(normalized));
+
+            if (licenseData.keys) {
+                const clearKeys: Record<string, string> = {};
+                licenseData.keys.forEach((k: { kid: string; k: string }) => {
+                    clearKeys[base64ToHex(k.kid)] = base64ToHex(k.k);
+                });
+                config.clearKeys = clearKeys;
+            }
+        } catch (e) {
+            console.warn('[Player] ClearKey parse error:', e);
+        }
+    }
+
+    // Widevine DRM
+    if (license && isHttpUrl(license) && type !== 'dash-clearkey') {
+        config.widevineUrl = license;
+    }
+
+    return config;
+};
+
+// ============================================
+// Player Component
 // ============================================
 
 export default function Player({
@@ -108,345 +231,280 @@ export default function Player({
     type,
     channels,
     currentIndex = 0,
-    onChannelChange
+    onChannelChange,
+    onDebugInfo
 }: PlayerProps) {
-    const artRef = useRef<HTMLDivElement>(null);
-    const ttmlRef = useRef<HTMLDivElement>(null);
-
-    // Refs untuk cleanup
+    // Refs
+    const containerRef = useRef<HTMLDivElement>(null);
+    const artRef = useRef<Artplayer | null>(null);
     const hlsRef = useRef<Hls | null>(null);
-    const dashRef = useRef<any>(null);
-    const artInstanceRef = useRef<any>(null);
+    const shakaRef = useRef<any>(null);
     const errorTimeoutRef = useRef<NodeJS.Timeout | null>(null);
-
-    // Memoized headers untuk menghindari re-render tidak perlu
+    const mountedRef = useRef(true);
+    const initializingRef = useRef(false);
+    const effectVersionRef = useRef(0); // Version tracker to prevent async race conditions
+    const initLockRef = useRef<string | null>(null); // To prevent concurrent initializations per URL
+    // Memoized headers
     const memoizedHeaders = useMemo(() => headers, [headers]);
 
-    // Unified error state
-    const [errorState, setErrorState] = useState<ErrorState>({
-        show: false,
-        message: null
+    // State
+    const [state, setState] = useState<PlayerState>({
+        isLoading: true,
+        hasError: false,
+        errorMessage: null,
+        hasStartedPlaying: false,
+        isTransitioning: false,
     });
 
-    // Loading state for DRM patching overlay
-    const [isLoading, setIsLoading] = useState(true);
+    // Use refs for state values that need to be accessed in event handlers
+    const stateRef = useRef(state);
+    stateRef.current = state;
 
-    // Track if channel has successfully started playing
-    // Only flag error at beginning, not during playback
-    const [hasStartedPlaying, setHasStartedPlaying] = useState(false);
-
-    // Track if we're currently transitioning to prevent multiple auto-transitions
-    const [channelTransitioning, setChannelTransitioning] = useState(false);
+    // Check if Android mode is needed
+    const androidMode = useMemo(() => needsAndroidMode(title), [title]);
 
     // ============================================
-    // Helper Methods
+    // Cleanup Functions
     // ============================================
 
-    /**
-     * Detect actual stream URL and license from props
-     * Handles Events channels where fields may be swapped
-     */
-    const getStreamInfo = useCallback(() => {
-        const actualStreamUrl = license && isHttpUrl(license) ? license : url;
-        const actualLicense = license && isHttpUrl(license) ? null : license;
-        return { actualStreamUrl, actualLicense };
-    }, [url, license]);
-
-    /**
-     * Construct proxy URL with headers
-     */
-    const getProxyUrl = useCallback((targetUrl: string, drm?: string, useAndroidHeaders?: boolean): string => {
-        const params = new URLSearchParams({ url: targetUrl });
-        if (drm) params.append('drm', drm);
-        if (useAndroidHeaders) params.append('android', '1');
-
-        // Default headers mimicking Android App
-        if (!params.has('user_agent')) {
-            params.append('user_agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/119.0');
-        }
-
-        if (!params.has('referer') && (!memoizedHeaders || !memoizedHeaders['referer'])) {
-            params.append('referer', 'https://duktek.id/?device=BitTVWeb&is_genuine=true');
-        }
-
-        if (!params.has('origin') && (!memoizedHeaders || !memoizedHeaders['origin'])) {
-            params.append('origin', 'https://duktek.id');
-        }
-
-        // Case-insensitive header lookup
-        if (memoizedHeaders) {
-            const getHeader = (key: string) => 
-                Object.keys(memoizedHeaders).find(k => k.toLowerCase() === key.toLowerCase());
-
-            const refererKey = getHeader('referer');
-            if (refererKey) params.set('referer', memoizedHeaders[refererKey]);
-
-            const originKey = getHeader('origin');
-            if (originKey) params.set('origin', memoizedHeaders[originKey]);
-
-            const uaKey = getHeader('user-agent');
-            if (uaKey) params.set('user_agent', memoizedHeaders[uaKey]);
-        }
-
-        return `/api/playlist/proxy?${params.toString()}`;
-    }, [memoizedHeaders]);
-
-    /**
-     * Probe a proxied URL to check availability
-     * Returns true when the proxied endpoint responds successfully
-     */
-    const probeProxied = useCallback(async (proxyUrl: string): Promise<boolean> => {
-        try {
-            // Create new abort controller for this probe
-            const controller = new AbortController();
-            
-            // Set timeout to abort after 5 seconds
-            const timeoutId = setTimeout(() => controller.abort(), 5000);
-            
-            // Try HEAD first to minimize bandwidth
-            let res = await fetch(proxyUrl, { method: 'HEAD', signal: controller.signal });
-            clearTimeout(timeoutId);
-            if (res && res.status >= 200 && res.status < 400) return true;
-
-            // Some servers disallow HEAD; try lightweight GET with Range
-            controller.abort(); // Abort previous, create new
-            const controller2 = new AbortController();
-            res = await fetch(proxyUrl, { method: 'GET', headers: { 'Range': 'bytes=0-0' }, signal: controller2.signal });
-            if (res && res.status >= 200 && res.status < 400) return true;
-
-            return false;
-        } catch (e: any) {
-            // Ignore expected abort errors
-            if (e.name === 'AbortError' || e.message?.includes('aborted')) {
-                return false;
-            }
-            console.warn('[Player] Probe failed:', e.name);
-            return false;
+    const cleanupHls = useCallback(() => {
+        if (hlsRef.current) {
+            try {
+                hlsRef.current.destroy();
+            } catch (e) { /* ignore */ }
+            hlsRef.current = null;
         }
     }, []);
 
-    /**
-     * Detect stream type from URL and props
-     */
-    const detectStreamType = useCallback((streamUrl: string, licenseUrl: string): StreamDetectionResult => {
-        const isWebKit = typeof navigator !== 'undefined' && 
-            /AppleWebKit/.test(navigator.userAgent) && !/Chrome/.test(navigator.userAgent);
-
-        // Find HLS candidate for WebKit
-        const hlsCandidate = hasHlsExtension(streamUrl) ? streamUrl : 
-            (hasHlsExtension(url) ? url : (hasHlsExtension(licenseUrl) ? licenseUrl : null));
-
-        if (isWebKit && hlsCandidate) {
-            console.log('[Player] WebKit detected - preferring HLS candidate');
-            return { type: 'm3u8', url: hlsCandidate };
+    const cleanupShaka = useCallback(async () => {
+        if (shakaRef.current) {
+            try {
+                await shakaRef.current.destroy();
+            } catch (e) { /* ignore */ }
+            shakaRef.current = null;
         }
+    }, []);
 
-        // Check explicit type prop
-        if (type && (type.includes('dash') || type === 'mpd')) {
-            console.log('[Player] Using explicit type prop (DASH):', type);
-            return { type: 'mpd', url: streamUrl };
+    const cleanupArt = useCallback(() => {
+        if (artRef.current) {
+            try {
+                // Pause and clear video source first
+                const video = artRef.current.video;
+                if (video) {
+                    video.pause();
+                    video.src = '';
+                    video.load();
+                }
+                artRef.current.destroy(true);
+            } catch (e) { /* ignore */ }
+            artRef.current = null;
         }
+    }, []);
 
-        // Detect from URL extension
-        if (streamUrl.includes('.mpd')) {
-            console.log('[Player] Detected from URL: .mpd extension');
-            return { type: 'mpd', url: streamUrl };
+    const cleanupAll = useCallback(async () => {
+        if (errorTimeoutRef.current) {
+            clearTimeout(errorTimeoutRef.current);
+            errorTimeoutRef.current = null;
         }
+        cleanupArt(); // Synchronously destroy Artplayer first to release DOM
+        cleanupHls();
+        await cleanupShaka();
+    }, [cleanupHls, cleanupShaka, cleanupArt]);
 
-        if (hasHlsExtension(streamUrl)) {
-            console.log('[Player] Detected from URL: .m3u8 extension');
-            return { type: 'm3u8', url: streamUrl };
-        }
+    // ============================================
+    // Error Handling
+    // ============================================
 
-        // Default to HLS
-        console.log('[Player] Defaulting to HLS');
-        return { type: 'm3u8', url: streamUrl };
-    }, [type, url]);
-
-    /**
-     * Unified error handler
-     */
     const showError = useCallback((message?: string) => {
-        setErrorState(prev => ({ show: true, message: message || null }));
+        setState(prev => ({ ...prev, hasError: true, errorMessage: message || null, isLoading: false }));
     }, []);
 
     const hideError = useCallback(() => {
-        setErrorState(prev => ({ show: false, message: null }));
+        setState(prev => ({ ...prev, hasError: false, errorMessage: null }));
     }, []);
 
     // ============================================
-    // Channel Navigation Handlers
+    // Channel Navigation
     // ============================================
 
     const handlePrevChannel = useCallback(() => {
         if (!channels || channels.length === 0 || currentIndex <= 0) return;
-        const newIndex = currentIndex - 1;
-        const newChannel = channels[newIndex];
-        console.log('[Player] Previous channel:', newChannel.name, 'Index:', newIndex);
-        // Reset playing state for new channel
-        setHasStartedPlaying(false);
-        setChannelTransitioning(false);
-        onChannelChange?.(newChannel, newIndex);
+        setState(prev => ({ ...prev, hasStartedPlaying: false, isTransitioning: false }));
+        onChannelChange?.(channels[currentIndex - 1], currentIndex - 1);
     }, [channels, currentIndex, onChannelChange]);
 
     const handleNextChannel = useCallback(() => {
         if (!channels || channels.length === 0 || currentIndex >= channels.length - 1) return;
-        const newIndex = currentIndex + 1;
-        const newChannel = channels[newIndex];
-        console.log('[Player] Next channel:', newChannel.name, 'Index:', newIndex);
-        // Reset playing state for new channel
-        setHasStartedPlaying(false);
-        setChannelTransitioning(false);
-        onChannelChange?.(newChannel, newIndex);
+        setState(prev => ({ ...prev, hasStartedPlaying: false, isTransitioning: false }));
+        onChannelChange?.(channels[currentIndex + 1], currentIndex + 1);
     }, [channels, currentIndex, onChannelChange]);
 
-    const hasPrevChannel = channels && channels.length > 0 && currentIndex > 0;
-    const hasNextChannel = channels && channels.length > 0 && currentIndex < channels.length - 1;
+    const hasPrevChannel = Boolean(channels && channels.length > 0 && currentIndex > 0);
+    const hasNextChannel = Boolean(channels && channels.length > 0 && currentIndex < channels.length - 1);
 
     // Keyboard navigation
     useEffect(() => {
         const handleKeyDown = (e: KeyboardEvent) => {
-            if (e.key === 'ArrowLeft') {
-                handlePrevChannel();
-            } else if (e.key === 'ArrowRight') {
-                handleNextChannel();
-            }
+            if (e.key === 'ArrowLeft') handlePrevChannel();
+            else if (e.key === 'ArrowRight') handleNextChannel();
         };
         window.addEventListener('keydown', handleKeyDown);
         return () => window.removeEventListener('keydown', handleKeyDown);
     }, [handlePrevChannel, handleNextChannel]);
 
-    /**
-     * Cleanup HLS instance
-     */
-    const cleanupHls = useCallback(() => {
-        if (hlsRef.current) {
-            hlsRef.current.destroy();
-            hlsRef.current = null;
-        }
-    }, []);
-
-    /**
-     * Cleanup DASH instance
-     */
-    const cleanupDash = useCallback(async () => {
-        if (dashRef.current) {
-            const prevPlayer = dashRef.current;
-            dashRef.current = null;
-            try {
-                await prevPlayer.destroy();
-            } catch (e) {
-                console.warn('[Player] Failed to destroy DASH player:', e);
-            }
-        }
-    }, []);
-
-    /**
-     * Cleanup artplayer instance
-     */
-    const cleanupArt = useCallback(() => {
-        if (artInstanceRef.current) {
-            try {
-                artInstanceRef.current.destroy(true);
-            } catch (e) {
-                console.warn('[Player] Failed to destroy Artplayer:', e);
-            }
-            artInstanceRef.current = null;
-        }
-    }, []);
-
     // ============================================
-    // Cleanup helper
+    // HLS Engine
     // ============================================
 
-    const cleanupAll = useCallback(() => {
-        // Clear error timeout
-        if (errorTimeoutRef.current) {
-            clearTimeout(errorTimeoutRef.current);
-            errorTimeoutRef.current = null;
-        }
-
-        // Cleanup video element
-        if (artInstanceRef.current?.video) {
-            try {
-                const video = artInstanceRef.current.video;
-                video.pause();
-                video.src = '';
-                video.load();
-            } catch (e) {
-                console.warn('[Player] Failed to cleanup video element:', e);
-            }
-        }
-
-        // Cleanup media players
+    const setupHls = useCallback((video: HTMLMediaElement, proxyUrl: string) => {
         cleanupHls();
-        cleanupDash();
-        cleanupArt();
-    }, [cleanupHls, cleanupDash, cleanupArt]);
+
+        if (Hls.isSupported()) {
+            const hls = new Hls({
+                xhrSetup: (xhr, requestUrl) => {
+                    if (!requestUrl.includes('api/playlist/proxy')) {
+                        xhr.open('GET', buildProxyUrl(requestUrl, { headers: memoizedHeaders, androidMode }), true);
+                    }
+                    try { xhr.withCredentials = false; } catch (e) { /* ignore */ }
+                }
+            });
+
+            hls.loadSource(proxyUrl);
+            hls.attachMedia(video);
+            hlsRef.current = hls;
+
+            hls.on(Hls.Events.ERROR, (_, data) => {
+                if (data?.fatal && mountedRef.current) {
+                    artRef.current?.emit('error', data);
+                }
+            });
+
+        } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+            // Native HLS for Safari
+            video.src = proxyUrl;
+        }
+    }, [cleanupHls, memoizedHeaders, androidMode]);
 
     // ============================================
-    // Main useEffect
+    // DASH/Shaka Engine
+    // ============================================
+
+    const setupShaka = useCallback(async (video: HTMLMediaElement, proxyUrl: string, drmConfig: ReturnType<typeof buildDrmConfig>) => {
+        await cleanupShaka();
+        if (!mountedRef.current) return;
+
+        const shaka = await import('shaka-player') as any;
+        shaka.polyfill.installAll();
+
+        if (!shaka.Player.isBrowserSupported()) {
+            showError('Browser does not support DASH playback');
+            return;
+        }
+
+        const player = new shaka.Player();
+        await player.attach(video);
+        
+        if (!mountedRef.current) {
+            await player.destroy();
+            return;
+        }
+
+        shakaRef.current = player;
+
+        // Configure request filter for proxy
+        player.getNetworkingEngine()?.registerRequestFilter((reqType: any, request: any) => {
+            if (request.uris?.length > 0) {
+                const uri = request.uris[0];
+                if (uri.startsWith('http') && !uri.includes(window.location.host) && !uri.includes('/api/playlist/proxy')) {
+                    request.uris[0] = buildProxyUrl(uri, { headers: memoizedHeaders, androidMode });
+                }
+            }
+        });
+
+        // Configure DRM
+        const config: any = {};
+        
+        if (drmConfig.clearKeys) {
+            config.drm = { clearKeys: drmConfig.clearKeys };
+        } else if (drmConfig.widevineUrl) {
+            config.drm = { servers: { 'com.widevine.alpha': drmConfig.widevineUrl } };
+        }
+
+        if (Object.keys(config).length > 0) {
+            player.configure(config);
+        }
+
+        // Load manifest
+        try {
+            await player.load(proxyUrl);
+        } catch (e: any) {
+            if (mountedRef.current) {
+                showError(e?.message || 'Failed to load DASH stream');
+                artRef.current?.emit('error', e);
+            }
+        }
+    }, [cleanupShaka, showError, memoizedHeaders, androidMode]);
+
+    // ============================================
+    // Main Player Initialization
     // ============================================
 
     useEffect(() => {
-        if (!artRef.current) return;
-
-        let isActive = true;
-        const { actualStreamUrl, actualLicense } = getStreamInfo();
-        const { type: streamType, url: selectedUrl } = detectStreamType(actualStreamUrl, license || '');
-
-        console.log('[Player] Stream Detection:', {
-            selectedUrl,
-            detectedType: streamType,
-            typeFromProps: type,
-            isMPD: selectedUrl.includes('.mpd'),
-            urlLicenseUsedAsStream: license && isHttpUrl(license)
-        });
-
-        let useAndroidHeadersForPlayer = false;
-        let art: any = null;
+        const container = containerRef.current;
+        if (!container) return;
+        
+        mountedRef.current = true;
+        const currentUrl = url;
+        const currentVersion = ++effectVersionRef.current;
 
         const initPlayer = async () => {
-            // Preflight probes
-            const normalProxy = getProxyUrl(selectedUrl);
-            const androidProxy = getProxyUrl(selectedUrl, undefined, true);
-            let finalProxy = normalProxy;
+            // Guard: don't re-init if already initializing the same URL with active player
+            if (initLockRef.current === currentUrl && artRef.current) return;
+            initLockRef.current = currentUrl;
 
-            try {
-                const ok = await probeProxied(normalProxy);
-                if (!ok) {
-                    const okAndroid = await probeProxied(androidProxy);
-                    if (okAndroid) {
-                        finalProxy = androidProxy;
-                        useAndroidHeadersForPlayer = true;
-                        console.log('[Player] Using Android-emulated proxy headers');
-                    } else {
-                        console.log('[Player] Preflight probes failed, using default');
-                    }
-                }
-            } catch (e) {
-                console.warn('[Player] Preflight probe threw:', e);
-            }
-
-            // Guard: only proceed if component is still active
-            if (!isActive || !artRef.current) {
-                console.log('[Player] Component unmounted, skipping Artplayer creation');
+            // Cleanup any existing instances first
+            await cleanupAll();
+            
+            // Check if this effect is still the latest one
+            if (!mountedRef.current || url !== currentUrl || !container || currentVersion !== effectVersionRef.current) {
+                if (initLockRef.current === currentUrl) initLockRef.current = null;
                 return;
             }
+            
+            // Ensure container is empty before Artplayer mount
+            container.innerHTML = '';
+            
+            // Detect stream type
+            const { streamType, streamUrl } = detectStreamType(url, type, license);
+            const drmConfig = buildDrmConfig(type, license);
+            const drmQuery = streamType === 'dash-clearkey' ? 'clearkey' : undefined;
+            
+            // Build proxy URL
+            const proxyUrl = buildProxyUrl(streamUrl, {
+                headers: memoizedHeaders,
+                drm: drmQuery,
+                androidMode,
+            });
 
-            // Destroy any previous instance
-            if (art) {
-                try {
-                    art.destroy(true);
-                } catch (e) {
-                    console.warn('[Player] Could not destroy previous instance:', e);
-                }
+            // Report technical info for debugger
+            if (onDebugInfo) {
+                onDebugInfo({
+                    originalUrl: streamUrl,
+                    proxyUrl: proxyUrl,
+                    streamType: streamType,
+                    drmKeys: drmConfig.clearKeys ? JSON.stringify(drmConfig.clearKeys) : undefined,
+                    playMethod: streamType.startsWith('dash') ? 'shaka' : 'hls',
+                    error: null
+                });
             }
 
-            art = new Artplayer({
-                container: artRef.current,
-                url: actualStreamUrl,
-                title: title,
+            // Determine Artplayer type
+            const artType = streamType.startsWith('dash') ? 'mpd' : 'm3u8';
+
+            // Create Artplayer instance
+            const art = new Artplayer({
+                container: container,
+                url: streamUrl,                title: title,
                 volume: 1,
                 isLive: true,
                 muted: false,
@@ -469,293 +527,98 @@ export default function Player({
                 theme: '#6366f1',
                 loading: false,
                 click: false,
-                type: streamType,
+                type: artType,
                 customType: {
-                    m3u8: function (video: HTMLMediaElement, url: string) {
-                        console.log('[Player] Processing M3U8 stream:', { 
-                            url: actualStreamUrl, 
-                            proxyUrl: getProxyUrl(actualStreamUrl) 
-                        });
-
-                        const proxyUrl = finalProxy || getProxyUrl(actualStreamUrl, undefined, useAndroidHeadersForPlayer);
-
-                        // Setup CORS and playsinline for WebKit
-                        try {
-                            video.crossOrigin = 'anonymous';
-                            video.setAttribute('webkit-playsinline', '');
-                        } catch (e) {}
-
-                        if (Hls.isSupported()) {
-                            // Clean previous HLS instance
-                            if (hlsRef.current) {
-                                hlsRef.current.destroy();
-                            }
-
-                            const hls = new Hls({
-                                xhrSetup: function (xhr, url) {
-                                    // Route segment/chunk requests through proxy
-                                    if (!url.includes('api/playlist/proxy')) {
-                                        xhr.open('GET', getProxyUrl(url, undefined, useAndroidHeadersForPlayer), true);
-                                    }
-                                    try { xhr.withCredentials = false; } catch (e) {}
-                                }
-                            });
-
-                            hls.loadSource(proxyUrl);
-                            hls.attachMedia(video);
-                            hlsRef.current = hls;
-
-                            // WebKit autoplay - using extracted helper
-                            if (typeof navigator !== 'undefined' && 
-                                /AppleWebKit/.test(navigator.userAgent) && !/Chrome/.test(navigator.userAgent)) {
-                                setupWebKitAutoplay(video);
-                                const p = video.play();
-                                if (p && typeof p.catch === 'function') {
-                                    p.catch(() => {});
-                                }
-                            }
-
-                            hls.on(Hls.Events.ERROR, (event, data) => {
-                                if (data?.fatal) {
-                                    art.emit('error', data);
-                                }
-                            });
-                        } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
-                            // Native HLS for Safari
-                            try {
-                                video.crossOrigin = 'anonymous';
-                                video.setAttribute('webkit-playsinline', '');
-                            } catch (e) {}
-
-                            // WebKit autoplay - using extracted helper
-                            if (typeof navigator !== 'undefined' && 
-                                /AppleWebKit/.test(navigator.userAgent) && !/Chrome/.test(navigator.userAgent)) {
-                                setupWebKitAutoplay(video);
-                                const p = video.play();
-                                if (p && typeof p.catch === 'function') {
-                                    p.catch(() => {});
-                                }
-                            }
-
-                            video.src = proxyUrl;
-                        }
+                    m3u8: (video: HTMLMediaElement) => {
+                        setupHls(video, proxyUrl);
                     },
-
-                    mpd: async function (video: HTMLMediaElement, url: string) {
-                        console.log('[Player] Initializing DASH stream:', { 
-                            url: actualStreamUrl, 
-                            hasShaka: typeof window !== 'undefined' && !!(window as any).shaka 
-                        });
-
-                        const shaka = await import('shaka-player') as any;
-                        shaka.polyfill.installAll();
-
-                        if (!shaka.Player.isBrowserSupported()) {
-                            console.warn('[Player] Shaka not supported');
-                            return;
-                        }
-                        if (!isActive) return;
-
-                        // Cleanup previous DASH instance
-                        if (dashRef.current) {
-                            const prevPlayer = dashRef.current;
-                            dashRef.current = null;
-                            await prevPlayer.destroy();
-                        }
-                        if (!isActive) return;
-
-                        const player = new shaka.Player();
-                        await player.attach(video);
-                        if (!isActive) {
-                            await player.destroy();
-                            return;
-                        }
-
-                        dashRef.current = player;
-                        (window as any).__shakaPlayer = player;
-
-                        // DRM configuration
-                        const drmType = type?.includes('clearkey') ? 'clearkey' : undefined;
-                        const proxiedManifestUrl = getProxyUrl(actualStreamUrl, drmType, useAndroidHeadersForPlayer) || 
-                            (finalProxy || getProxyUrl(actualStreamUrl, drmType));
-
-                        // Register request filter for proxy
-                        player.getNetworkingEngine()?.registerRequestFilter((type: any, request: any) => {
-                            if (request.uris?.length > 0) {
-                                const uri = request.uris[0];
-                                if (uri.startsWith('http') && 
-                                    !uri.includes(window.location.host) && 
-                                    !uri.includes('/api/playlist/proxy')) {
-                                    request.uris[0] = getProxyUrl(uri, undefined, useAndroidHeadersForPlayer);
-                                }
-                            }
-                        });
-
-                        // Clearkey DRM setup
-                        if (actualLicense && type === 'dash-clearkey') {
-                            try {
-                                const normalizedLicense = actualLicense.replace(/-/g, '+').replace(/_/g, '/');
-                                const paddedLicense = normalizedLicense.length % 4 === 0 
-                                    ? normalizedLicense 
-                                    : normalizedLicense + '='.repeat(4 - (normalizedLicense.length % 4));
-                                const licenseData = JSON.parse(atob(paddedLicense));
-
-                                if (licenseData.keys) {
-                                    const clearKeys: { [keyId: string]: string } = {};
-                                    licenseData.keys.forEach((k: any) => {
-                                        clearKeys[base64ToHex(k.kid)] = base64ToHex(k.k);
-                                    });
-                                    player.configure({ drm: { clearKeys: clearKeys } });
-                                }
-                            } catch (e) {
-                                console.warn('[Player] Failed to setup clearkey:', e);
-                            }
-                        }
-
-                        // Widevine DRM
-                        if (license && type !== 'dash-clearkey' && license.startsWith('http')) {
-                            player.configure({ drm: { servers: { 'com.widevine.alpha': license } } });
-                        }
-
-                        // Load manifest
-                        try {
-                            if (!isActive) return;
-                            console.log('[Player] Loading DASH manifest:', proxiedManifestUrl);
-                            await player.load(proxiedManifestUrl);
-                            console.log('[Player] DASH manifest loaded successfully');
-
-                            // WebKit autoplay after manifest load
-                            if (isActive && 
-                                typeof navigator !== 'undefined' && 
-                                /AppleWebKit/.test(navigator.userAgent) && 
-                                !/Chrome/.test(navigator.userAgent)) {
-                                setupWebKitAutoplay(video);
-                                const p = video.play();
-                                if (p && typeof p.catch === 'function') {
-                                    p.catch(() => {});
-                                }
-                            }
-                        } catch (e: any) {
-                            console.error('[Player] DASH Error:', {
-                                message: e?.message,
-                                code: e?.code,
-                                stack: e?.stack,
-                                url: proxiedManifestUrl
-                            });
-                            const errorMsg = e?.message || 'Failed to load DASH stream';
-                            if (isActive) {
-                                showError(errorMsg);
-                                art.emit('error', e);
-                            }
-                        }
+                    mpd: async (video: HTMLMediaElement) => {
+                        await setupShaka(video, proxyUrl, drmConfig);
                     },
                 },
             } as any);
 
-            artInstanceRef.current = art;
-
-            // Disable default loading indicator
-            try { 
-                if (art?.loading) {
-                    art.loading.show = false;
-                }
-                // Hide all default loading elements
-                if (art?.player?.classList) {
-                    art.player.classList.remove('artplayer-loading');
-                }
-            } catch (e) {}
-
-            // Always show custom DRM loading overlay
-            setIsLoading(true);
+            artRef.current = art;
 
             // Event handlers
             art.on('play', () => {
-                setIsLoading(false);
-                hideError();
-                setHasStartedPlaying(true);
+                if (mountedRef.current) {
+                    setState(prev => ({ ...prev, isLoading: false, hasError: false, hasStartedPlaying: true }));
+                }
             });
 
             art.on('video:waiting', () => {
-                // Always show custom loading during buffering
-                setIsLoading(true);
+                if (mountedRef.current) {
+                    setState(prev => ({ ...prev, isLoading: true }));
+                }
             });
 
             art.on('video:playing', () => {
-                // Hide loading overlay when video actually plays
-                setIsLoading(false);
-                hideError();
-                setHasStartedPlaying(true);
+                if (mountedRef.current) {
+                    setState(prev => ({ ...prev, isLoading: false, hasError: false, hasStartedPlaying: true }));
+                }
             });
 
             art.on('canplay', () => {
-                setIsLoading(false);
-                setHasStartedPlaying(true);
+                if (mountedRef.current) {
+                    setState(prev => ({ ...prev, isLoading: false, hasStartedPlaying: true }));
+                }
             });
 
             art.on('error', (err: any) => {
-                console.error('[Player Error]', err);
+                if (!mountedRef.current || stateRef.current.isTransitioning) return;
 
-                // Hide loading overlay
-                setIsLoading(false);
-
-                // Prevent multiple error handling
-                if (channelTransitioning) {
-                    console.log('[Player] Already transitioning, ignoring error');
-                    return;
+                const errorMsg = err?.message || 'Playback error';
+                
+                if (onDebugInfo) {
+                    onDebugInfo({
+                        originalUrl: streamUrl,
+                        proxyUrl: proxyUrl,
+                        streamType: streamType,
+                        drmKeys: drmConfig.clearKeys ? JSON.stringify(drmConfig.clearKeys) : undefined,
+                        playMethod: streamType.startsWith('dash') ? 'shaka' : 'hls',
+                        error: errorMsg
+                    });
                 }
 
-                // Check if channel was already playing
-                if (hasStartedPlaying) {
-                    // Channel was playing - auto-move to next channel
-                    console.log('[Player] Error during playback, auto-moving to next channel');
-                    setChannelTransitioning(true);
-                    
-                    // Show temporary error message
-                    setErrorState({
-                        show: true,
-                        message: 'Error, moving to next channel...'
-                    });
+                setState(prev => ({ ...prev, isLoading: false }));
 
-                    // Move to next channel after delay
-                    if (errorTimeoutRef.current) {
-                        clearTimeout(errorTimeoutRef.current);
-                    }
+                if (stateRef.current.hasStartedPlaying) {
+                    // Auto-move to next channel on mid-playback error
+                    setState(prev => ({ ...prev, isTransitioning: true, hasError: true, errorMessage: 'Error, moving to next channel...' }));
+                    
+                    if (errorTimeoutRef.current) clearTimeout(errorTimeoutRef.current);
                     errorTimeoutRef.current = setTimeout(() => {
-                        setChannelTransitioning(false);
+                        setState(prev => ({ ...prev, isTransitioning: false }));
                         handleNextChannel();
                     }, 1500);
                 } else {
-                    // Error at beginning - show error overlay, don't close modal
-                    console.log('[Player] Error at start, showing error overlay');
+                    // Error at start - show overlay
                     cleanupHls();
-                    cleanupDash();
+                    cleanupShaka();
                     showError();
                 }
             });
 
-            // Video element error listener
+            // Video element error
             try {
                 art.video.addEventListener('error', () => {
-                    showError();
+                    if (mountedRef.current) showError();
                 });
-            } catch (e) {}
+            } catch (e) { /* ignore */ }
         };
 
-        // Initialize player
         initPlayer();
 
         // Cleanup on unmount
         return () => {
-            isActive = false;
+            mountedRef.current = false;
+            initializingRef.current = false;
+            initLockRef.current = null;
             cleanupAll();
         };
-    }, [
-        url, title, license, licenseHeader, type,
-        memoizedHeaders,
-        getStreamInfo, detectStreamType, getProxyUrl, probeProxied,
-        showError, hideError, cleanupHls, cleanupDash, cleanupAll, onClose,
-        hasStartedPlaying, channelTransitioning, handleNextChannel
-    ]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [url, title, license, type, androidMode]);
 
     // ============================================
     // Render
@@ -763,29 +626,31 @@ export default function Player({
 
     return (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/90 backdrop-blur-md">
-            <div className={`relative w-[80vw] h-[80vh] glass-card overflow-hidden rounded-2xl group transition-all duration-300 ${isLoading ? 'border-primary/30 shadow-lg shadow-primary/10' : ''}`}>
-                {/* Glass card loading effect */}
-                {isLoading && (
+            <div className={`relative w-[80vw] h-[80vh] glass-card overflow-hidden rounded-2xl group transition-all duration-300 ${state.isLoading ? 'border-primary/30 shadow-lg shadow-primary/10' : ''}`}>
+                
+                {/* Loading Effect - Top Border */}
+                {state.isLoading && (
                     <div className="absolute inset-0 z-20 pointer-events-none">
-                        <div className="absolute inset-0 bg-gradient-to-b from-primary/5 via-transparent to-transparent"></div>
+                        <div className="absolute inset-0 bg-gradient-to-b from-primary/5 via-transparent to-transparent" />
                         <div className="absolute top-0 left-0 right-0 h-1 bg-primary/20 overflow-hidden">
-                            <div className="h-full bg-primary/60 animate-pulse w-1/3"></div>
+                            <div className="h-full bg-primary/60 animate-pulse w-1/3" />
                         </div>
                     </div>
                 )}
-                <div ref={artRef} className="w-full h-full" />
-                <div ref={ttmlRef} className="absolute inset-0 pointer-events-none z-10" />
-                
-                {/* DRM Patching Loading Overlay */}
-                {isLoading && !errorState.show && (
+
+                {/* Video Container */}
+                <div ref={containerRef} className="w-full h-full" />
+
+                {/* Loading Overlay */}
+                {state.isLoading && !state.hasError && (
                     <div className="absolute inset-0 z-30 flex flex-col items-center justify-center bg-black/90">
                         <div className="flex flex-col items-center space-y-4">
-                            {/* Animated Shield Icon */}
+                            {/* Spinning Shield Icon */}
                             <div className="relative">
-                                <div className="w-16 h-16 border-4 border-primary/30 border-t-primary rounded-full animate-spin"></div>
-                                <div className="absolute inset-2 w-12 h-12 border-4 border-primary/20 border-t-primary/60 rounded-full animate-spin" style={{ animationDirection: 'reverse', animationDuration: '1.5s' }}></div>
+                                <div className="w-16 h-16 border-4 border-primary/30 border-t-primary rounded-full animate-spin" />
+                                <div className="absolute inset-2 w-12 h-12 border-4 border-primary/20 border-t-primary/60 rounded-full animate-spin" style={{ animationDirection: 'reverse', animationDuration: '1.5s' }} />
                                 <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="absolute inset-0 m-auto text-primary w-8 h-8">
-                                    <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path>
+                                    <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
                                 </svg>
                             </div>
                             
@@ -796,32 +661,29 @@ export default function Player({
                             
                             {/* Progress bar */}
                             <div className="w-48 h-1 bg-gray-800 rounded-full overflow-hidden">
-                                <div className="h-full bg-primary/50 animate-pulse" style={{ width: '60%' }}></div>
+                                <div className="h-full bg-primary/50 animate-pulse" style={{ width: '60%' }} />
                             </div>
                         </div>
                     </div>
                 )}
-                
-                {/* Custom Error Overlay */}
-                <div 
-                    className={`absolute inset-0 z-40 flex-col items-center justify-center bg-black/80 backdrop-blur-sm transition-all duration-300 ${errorState.show ? 'flex' : 'hidden'}`}
-                >
+
+                {/* Error Overlay */}
+                <div className={`absolute inset-0 z-40 flex-col items-center justify-center bg-black/80 backdrop-blur-sm transition-all duration-300 ${state.hasError ? 'flex' : 'hidden'}`}>
                     <div className="flex flex-col items-center space-y-4 animate-in fade-in zoom-in duration-300 max-w-md">
                         <div className="p-4 bg-red-500/20 rounded-full">
                             <svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="#ef4444" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                                <circle cx="12" cy="12" r="10"></circle>
-                                <line x1="12" y1="8" x2="12" y2="12"></line>
-                                <line x1="12" y1="16" x2="12.01" y2="16"></line>
+                                <circle cx="12" cy="12" r="10" />
+                                <line x1="12" y1="8" x2="12" y2="12" />
+                                <line x1="12" y1="16" x2="12.01" y2="16" />
                             </svg>
                         </div>
                         <h2 className="text-3xl md:text-4xl font-bold text-white tracking-widest uppercase drop-shadow-[0_0_15px_rgba(239,68,68,0.5)]">
-                            {errorState.message?.includes('moving to next channel') ? 'Stream Error' : 'Channel Error'}
+                            {state.errorMessage?.includes('moving to next channel') ? 'Stream Error' : 'Channel Error'}
                         </h2>
                         
-                        {/* Dynamic error message */}
-                        {errorState.message ? (
+                        {state.errorMessage ? (
                             <div className="w-full p-3 bg-red-500/10 border border-red-500/30 rounded-lg">
-                                <p className="text-sm text-red-200 text-center animate-pulse">{errorState.message}</p>
+                                <p className="text-sm text-red-200 text-center animate-pulse">{state.errorMessage}</p>
                             </div>
                         ) : (
                             <p className="text-white/60 text-sm md:text-base font-medium text-center">
@@ -829,8 +691,7 @@ export default function Player({
                             </p>
                         )}
                         
-                        {/* Only show Dismiss button for startup errors (no message or generic message) */}
-                        {!errorState.message?.includes('moving to next channel') && (
+                        {!state.errorMessage?.includes('moving to next channel') && (
                             <button 
                                 onClick={hideError}
                                 className="mt-4 px-6 py-2 bg-white/10 hover:bg-white/20 text-white rounded-full transition-all border border-white/10"
@@ -841,20 +702,21 @@ export default function Player({
                     </div>
                 </div>
 
+                {/* Close Button */}
                 <button
                     onClick={onClose}
                     className="absolute top-4 right-4 z-50 p-2 bg-black/50 hover:bg-red-500 text-white rounded-full transition-all hover:scale-110 active:scale-90"
                 >
                     <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                        <line x1="18" y1="6" x2="6" y2="18"></line>
-                        <line x1="6" y1="6" x2="18" y2="18"></line>
+                        <line x1="18" y1="6" x2="6" y2="18" />
+                        <line x1="6" y1="6" x2="18" y2="18" />
                     </svg>
                 </button>
 
-                {/* Channel Navigation Buttons */}
+                {/* Channel Navigation */}
                 {channels && channels.length > 0 && (
                     <>
-                        {/* Previous Channel Button */}
+                        {/* Previous Channel */}
                         <button
                             onClick={handlePrevChannel}
                             disabled={!hasPrevChannel}
@@ -866,11 +728,11 @@ export default function Player({
                             title="Previous Channel (←)"
                         >
                             <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                                <polyline points="15 18 9 12 15 6"></polyline>
+                                <polyline points="15 18 9 12 15 6" />
                             </svg>
                         </button>
 
-                        {/* Next Channel Button */}
+                        {/* Next Channel */}
                         <button
                             onClick={handleNextChannel}
                             disabled={!hasNextChannel}
@@ -882,11 +744,11 @@ export default function Player({
                             title="Next Channel (→)"
                         >
                             <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                                <polyline points="9 18 15 12 9 6"></polyline>
+                                <polyline points="9 18 15 12 9 6" />
                             </svg>
                         </button>
 
-                        {/* Channel Info Indicator */}
+                        {/* Channel Indicator */}
                         <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-50 px-4 py-2 bg-black/60 backdrop-blur-sm rounded-full">
                             <span className="text-white text-sm font-medium">
                                 {currentIndex + 1} / {channels.length}
@@ -898,4 +760,3 @@ export default function Player({
         </div>
     );
 }
-

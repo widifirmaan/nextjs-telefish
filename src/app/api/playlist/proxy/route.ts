@@ -3,13 +3,21 @@ import { NextRequest, NextResponse } from 'next/server';
 export const runtime = 'edge';
 export const dynamic = 'force-dynamic';
 
+// BitTV APK v2.1.5 Header Defaults
+const BITTV_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:119.0) Gecko/20100101 Firefox/119.0';
+const BITTV_REFERER = 'https://duktek.id/?device=BitTVWeb&is_genuine=true';
+const BITTV_ORIGIN = 'https://duktek.id';
+const ANDROID_USER_AGENT = 'Mozilla/5.0 (Linux; Android 13; Pixel 7 Build/TQ1A.231105.002) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Mobile Safari/537.36';
+const ANDROID_REFERER = 'https://duktek.id/?device=BitTVAndroid&is_genuine=true';
+
 async function handleRequest(request: NextRequest) {
     const searchParams = request.nextUrl.searchParams;
     const targetUrl = searchParams.get('url');
-    const referer = searchParams.get('referer') || 'https://duktek.id/';
-    const origin = searchParams.get('origin') || 'https://duktek.id';
-    const userAgent = searchParams.get('user_agent') || 'BitTV/2.1.4';
+    const referer = searchParams.get('referer') || BITTV_REFERER;
+    const origin = searchParams.get('origin') || BITTV_ORIGIN;
+    const userAgent = searchParams.get('user_agent') || BITTV_USER_AGENT;
     const useAndroid = (searchParams.get('android') || '').toLowerCase() === '1' || (searchParams.get('android') || '').toLowerCase() === 'true';
+
 
     if (!targetUrl) {
         return new NextResponse("Missing url parameter", { status: 400 });
@@ -17,10 +25,15 @@ async function handleRequest(request: NextRequest) {
 
     try {
         const headers: Record<string, string> = {
-            'User-Agent': useAndroid ? 'Mozilla/5.0 (Linux; Android 13; Pixel 7 Build/TQ1A.231105.002) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Mobile Safari/537.36' : userAgent,
+            'User-Agent': useAndroid ? ANDROID_USER_AGENT : userAgent,
         };
 
-        if (referer && referer !== 'none') headers['Referer'] = useAndroid ? (searchParams.get('referer') || 'https://duktek.id/?device=BitTVAndroid&is_genuine=true') : referer;
+        if (useAndroid) {
+            const androidRef = searchParams.get('referer');
+            headers['Referer'] = (androidRef && androidRef !== 'none') ? androidRef : ANDROID_REFERER;
+        } else if (referer && referer !== 'none') {
+            headers['Referer'] = referer;
+        }
         if (origin && origin !== 'none') headers['Origin'] = origin;
 
         const incomingRange = request.headers.get('range');
