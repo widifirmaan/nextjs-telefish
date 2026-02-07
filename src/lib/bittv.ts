@@ -9,7 +9,7 @@ export interface Channel {
     image?: string;
     header_iptv?: string;
     url_license?: string;
-    header_license?: string;
+    header_license?: string;unak
     jenis?: string;
     [key: string]: any;
 }

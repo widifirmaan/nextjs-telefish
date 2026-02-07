@@ -24,9 +24,10 @@ export default function Player({ url, title, onClose, headers, license, licenseH
     const actualLicense = license && (license.startsWith('http://') || license.startsWith('https://')) ? null : license;
 
     // Construct Proxy URL with headers
-    const getProxyUrl = (targetUrl: string, drm?: string) => {
+    const getProxyUrl = (targetUrl: string, drm?: string, useAndroidHeaders?: boolean) => {
         const params = new URLSearchParams({ url: targetUrl });
         if (drm) params.append('drm', drm);
+        if (useAndroidHeaders) params.append('android', '1');
 
         // Default Headers mimicking Android App (BitTVActivity.smali)
         // Construction: Mozilla/5.0 ... Firefox/119.0
@@ -61,6 +62,22 @@ export default function Player({ url, title, onClose, headers, license, licenseH
         }
 
         return `/api/playlist/proxy?${params.toString()}`;
+    };
+
+    // Probe a proxied URL to check availability before mounting heavy player instances.
+    // Returns true when the proxied endpoint responds with a successful status.
+    const probeProxied = async (proxyUrl: string) => {
+        try {
+            // Try HEAD first to minimize bandwidth
+            let res = await fetch(proxyUrl, { method: 'HEAD' });
+            if (res && res.status >= 200 && res.status < 400) return true;
+            // Some servers disallow HEAD; try a lightweight GET with Range
+            res = await fetch(proxyUrl, { method: 'GET', headers: { 'Range': 'bytes=0-0' } });
+            if (res && res.status >= 200 && res.status < 400) return true;
+            return false;
+        } catch (e) {
+            return false;
+        }
     };
 
     const hlsRef = useRef<any>(null);
@@ -120,9 +137,51 @@ export default function Player({ url, title, onClose, headers, license, licenseH
             urlLicenseUsedAsStream: license && (license.startsWith('http://') || license.startsWith('https://'))
         });
         
-        const art = new Artplayer({
-            container: artRef.current,
-            url: actualStreamUrl,
+        let useAndroidHeadersForPlayer = false;
+        let art: any = null;
+
+        const initPlayer = async () => {
+            // Preflight probes: try normal proxy, then try Android-emulated headers
+            const normalProxy = getProxyUrl(selectedUrl);
+            const androidProxy = getProxyUrl(selectedUrl, undefined, true);
+            let finalProxy = normalProxy;
+            try {
+                const ok = await probeProxied(normalProxy);
+                if (!ok) {
+                    const okAndroid = await probeProxied(androidProxy);
+                    if (okAndroid) {
+                        finalProxy = androidProxy;
+                        useAndroidHeadersForPlayer = true;
+                        console.log('[Player] Using Android-emulated proxy headers for this stream');
+                    } else {
+                        console.log('[Player] Preflight probes failed; falling back to default proxy behavior');
+                        finalProxy = normalProxy; // fallback to original behavior (will likely error)
+                    }
+                }
+            } catch (e) {
+                console.warn('[Player] Preflight probe threw, continuing with default proxy URL', e);
+                finalProxy = normalProxy;
+            }
+
+            // Guard: only proceed if component is still active and DOM exists
+            if (!isActive || !artRef.current) {
+                console.log('[Player] Component unmounted or ref missing, skipping Artplayer creation');
+                return;
+            }
+
+            // Destroy any previous instance before creating new one
+            if (art) {
+                try {
+                    art.destroy(true);
+                    art = null;
+                } catch (e) {
+                    console.warn('[Player] Could not destroy previous instance:', e);
+                }
+            }
+
+            art = new Artplayer({
+                container: artRef.current,
+                url: actualStreamUrl,
             title: title,
             volume: 1,
             isLive: true,
@@ -147,10 +206,10 @@ export default function Player({ url, title, onClose, headers, license, licenseH
             loading: false, 
             click: false,
             type: streamType,
-            customType: {
+                customType: {
                 m3u8: function (video: HTMLMediaElement, url: string) {
                     console.log('[Player] Processing M3U8 stream:', { url: actualStreamUrl, proxyUrl: getProxyUrl(actualStreamUrl) });
-                    const proxyUrl = getProxyUrl(actualStreamUrl);
+                    const proxyUrl = finalProxy || getProxyUrl(actualStreamUrl, undefined, useAndroidHeadersForPlayer);
 
                     // WebKit / Safari native HLS needs CORS-friendly URIs in playlist and crossOrigin on the video
                     try { video.crossOrigin = 'anonymous'; video.setAttribute('webkit-playsinline', ''); } catch (e) {}
@@ -161,7 +220,7 @@ export default function Player({ url, title, onClose, headers, license, licenseH
                             xhrSetup: function (xhr, url) {
                                 // Route segment/chunk requests through our proxy so CORS headers are applied
                                 if (!url.includes('api/playlist/proxy')) {
-                                    xhr.open('GET', getProxyUrl(url), true);
+                                    xhr.open('GET', getProxyUrl(url, undefined, useAndroidHeadersForPlayer), true);
                                 }
                                 // Avoid sending credentials to upstream
                                 try { xhr.withCredentials = false; } catch (e) {}
@@ -223,12 +282,12 @@ export default function Player({ url, title, onClose, headers, license, licenseH
                     dashRef.current = player;
                     (window as any).__shakaPlayer = player;
                     const drmType = type?.includes('clearkey') ? 'clearkey' : undefined;
-                    const proxiedManifestUrl = getProxyUrl(actualStreamUrl, drmType);
+                    const proxiedManifestUrl = getProxyUrl(actualStreamUrl, drmType, useAndroidHeadersForPlayer) || (finalProxy || getProxyUrl(actualStreamUrl, drmType));
                     player.getNetworkingEngine()?.registerRequestFilter((type: any, request: any) => {
                         if (request.uris && request.uris.length > 0) {
                             const uri = request.uris[0];
-                            if (uri.startsWith('http') && !uri.includes(window.location.host) && !uri.includes('/api/playlist/proxy')) {
-                                request.uris[0] = getProxyUrl(uri);
+                                if (uri.startsWith('http') && !uri.includes(window.location.host) && !uri.includes('/api/playlist/proxy')) {
+                                request.uris[0] = getProxyUrl(uri, undefined, useAndroidHeadersForPlayer);
                             }
                         }
                     });
@@ -288,76 +347,80 @@ export default function Player({ url, title, onClose, headers, license, licenseH
             },
         } as any);
 
-        const internalShowError = () => {
-            art.loading.show = false;
-            showError();
+            const internalShowError = () => {
+                if (!art) return;
+                try { art.loading.show = false; } catch (e) {}
+                showError();
+            };
+
+            const internalHideError = () => {
+                hideError();
+            };
+
+            let hasStartedPlaying = false;
+            try { if (art && art.loading) art.loading.show = false; } catch (e) {}
+
+            art.on('play', () => {
+                hasStartedPlaying = false;
+                internalHideError();
+            });
+
+            art.on('video:waiting', () => {
+                if (!hasStartedPlaying) try { art.loading.show = false; } catch (e) {}
+            });
+
+            art.on('video:playing', () => {
+                try { art.loading.show = false; } catch (e) {}
+                internalHideError();
+            });
+
+            art.on('error', (err: any) => {
+                console.error('[Player Error]', err);
+
+                try {
+                    if (hlsRef.current) {
+                        hlsRef.current.destroy();
+                        hlsRef.current = null;
+                    }
+                } catch (e) { /* ignore */ }
+                try {
+                    if (dashRef.current) {
+                        const d = dashRef.current;
+                        dashRef.current = null;
+                        try { d.destroy?.(); } catch (e) {}
+                    }
+                } catch (e) { /* ignore */ }
+
+                internalShowError();
+
+                try {
+                    setTimeout(() => {
+                        try { onClose(); } catch (e) { /* ignore */ }
+                    }, 1200);
+                } catch (e) {}
+            });
+
+            // Listen for video element errors specifically
+            try { art.video.addEventListener('error', internalShowError); } catch (e) {}
+
         };
 
-        const internalHideError = () => {
-            hideError();
-        };
-
-        let hasStartedPlaying = false;
-        art.loading.show = false; // Force hide initially
-
-        art.on('play', () => {
-            hasStartedPlaying = false;
-            internalHideError();
-        });
-
-        art.on('video:waiting', () => {
-            if (!hasStartedPlaying) art.loading.show = false;
-        });
-
-        art.on('video:playing', () => {
-            art.loading.show = false;
-            internalHideError();
-        });
-
-        art.on('error', (err: any) => {
-            console.error('[Player Error]', err);
-
-            // Best-effort cleanup: destroy HLS/DASH instances so they don't hold global
-            // network hooks or keep the player in a fatal state preventing new channels.
-            try {
-                if (hlsRef.current) {
-                    hlsRef.current.destroy();
-                    hlsRef.current = null;
-                }
-            } catch (e) { /* ignore */ }
-            try {
-                if (dashRef.current) {
-                    // shaka Player destroy returns a promise; call and ignore
-                    const d = dashRef.current;
-                    dashRef.current = null;
-                    try { d.destroy?.(); } catch (e) {}
-                }
-            } catch (e) { /* ignore */ }
-
-            internalShowError();
-
-            // Auto-close player after showing the error so the UI can mount a fresh
-            // player instance for another channel. Use a short delay to let the error
-            // message display before closing.
-            try {
-                setTimeout(() => {
-                    try { onClose(); } catch (e) { /* ignore */ }
-                }, 1200);
-            } catch (e) {}
-        });
-
-        // Listen for video element errors specifically
-        art.video.addEventListener('error', internalShowError);
+        // Start async init but don't block sync cleanup registration
+        initPlayer();
 
         return () => {
             isActive = false;
-            art.video.removeEventListener('error', internalShowError);
-            
+            try {
+                if (art && art.video) art.video.removeEventListener('error', () => {});
+            } catch (e) {}
+
             // Immediate stop
             try {
-                art.video.pause();
-                art.video.src = "";
-                art.video.load();
+                if (art && art.video) {
+                    art.video.pause();
+                    art.video.src = "";
+                    art.video.load();
+                }
             } catch (e) {}
 
             if (hlsRef.current) {
