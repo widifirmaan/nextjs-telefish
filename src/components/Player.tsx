@@ -69,6 +69,7 @@ export default function Player({
     const artRef = useRef<Artplayer | null>(null);
     const containerRef = useRef<HTMLDivElement>(null);
     const engineRef = useRef<any>(null);
+    const isMounted = useRef(false);
 
     // =========================================================================
     // HLS (m3u8) Setup - Replicates ExoPlayer behavior via HLS.js Interception
@@ -112,6 +113,8 @@ export default function Player({
     // =========================================================================
     const playFlv = useCallback(async (video: HTMLMediaElement, sourceUrl: string, art: Artplayer) => {
         const flvjs = await import('flv.js') as any;
+        if (!isMounted.current) return;
+        
         if (flvjs.default.isSupported()) {
             const flv = flvjs.default.createPlayer({
                 type: 'flv',
@@ -143,6 +146,8 @@ export default function Player({
     const playDash = useCallback(async (video: HTMLMediaElement, sourceUrl: string, art: Artplayer) => {
         // Dynamic import to avoid SSR issues
         const shakaModule = await import('shaka-player') as any;
+        if (!isMounted.current) return;
+        
         const shaka = shakaModule.default || shakaModule;
         // Install polyfills
         shaka.polyfill.installAll();
@@ -215,8 +220,13 @@ export default function Player({
                 // Load the ORIGINAL URL. Shaka resolves relative paths against this.
                 // The network filter then proxies the actual request.
                 engineRef.current = player;
+                if (!isMounted.current) {
+                    player.destroy();
+                    return;
+                }
                 await player.load(sourceUrl);
             } catch (e: any) {
+                if (e.name === 'AbortError' || e.code === 7000) return; // Ignore expected aborts
                 console.error("Shaka Error", e);
                 art.notice.show = "Error loading stream: " + e.message;
             }
@@ -231,6 +241,7 @@ export default function Player({
     }, [license, type]);
 
     useEffect(() => {
+        isMounted.current = true;
         if (!containerRef.current) return;
 
         let customType: any = {};
@@ -327,17 +338,18 @@ export default function Player({
         window.addEventListener('keydown', handleKeyDown);
 
         return () => {
+            isMounted.current = false;
             window.removeEventListener('keydown', handleKeyDown);
             
             // 1. Destroy Engine (HLS, Shaka, etc)
             if (engineRef.current) {
-                console.log("[Player] Explicitly destroying engine in cleanup");
+                const engine = engineRef.current;
+                console.log("[Player] Explicitly destroying engine in cleanup", engine.constructor?.name || 'Engine');
                 try {
-                    if (typeof engineRef.current.destroy === 'function') {
-                        engineRef.current.destroy();
-                    } else if (typeof engineRef.current.unload === 'function') {
-                        engineRef.current.unload();
-                        engineRef.current.destroy();
+                    if (typeof engine.destroy === 'function') {
+                        engine.destroy();
+                    } else if (typeof engine.unload === 'function') {
+                        engine.unload().then(() => engine.destroy());
                     }
                 } catch (e) {
                     console.error("[Player] Engine destroy failed", e);
@@ -350,9 +362,11 @@ export default function Player({
                 // Pause before destroy to prevent AbortError in some browsers
                 const video = artRef.current.video;
                 if (video) {
-                    video.pause();
-                    video.src = "";
-                    video.load();
+                    try {
+                        video.pause();
+                        video.removeAttribute('src'); // Explicitly remove src
+                        video.load();
+                    } catch (e) {}
                 }
                 artRef.current.destroy(false);
                 artRef.current = null;
