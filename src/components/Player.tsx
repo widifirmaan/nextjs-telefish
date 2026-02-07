@@ -131,6 +131,13 @@ export default function Player({
     // Loading state for DRM patching overlay
     const [isLoading, setIsLoading] = useState(true);
 
+    // Track if channel has successfully started playing
+    // Only flag error at beginning, not during playback
+    const [hasStartedPlaying, setHasStartedPlaying] = useState(false);
+
+    // Track if we're currently transitioning to prevent multiple auto-transitions
+    const [channelTransitioning, setChannelTransitioning] = useState(false);
+
     // ============================================
     // Helper Methods
     // ============================================
@@ -276,6 +283,9 @@ export default function Player({
         const newIndex = currentIndex - 1;
         const newChannel = channels[newIndex];
         console.log('[Player] Previous channel:', newChannel.name, 'Index:', newIndex);
+        // Reset playing state for new channel
+        setHasStartedPlaying(false);
+        setChannelTransitioning(false);
         onChannelChange?.(newChannel, newIndex);
     }, [channels, currentIndex, onChannelChange]);
 
@@ -284,6 +294,9 @@ export default function Player({
         const newIndex = currentIndex + 1;
         const newChannel = channels[newIndex];
         console.log('[Player] Next channel:', newChannel.name, 'Index:', newIndex);
+        // Reset playing state for new channel
+        setHasStartedPlaying(false);
+        setChannelTransitioning(false);
         onChannelChange?.(newChannel, newIndex);
     }, [channels, currentIndex, onChannelChange]);
 
@@ -659,6 +672,7 @@ export default function Player({
             art.on('play', () => {
                 setIsLoading(false);
                 hideError();
+                setHasStartedPlaying(true);
             });
 
             art.on('video:waiting', () => {
@@ -670,10 +684,12 @@ export default function Player({
                 // Hide loading overlay when video actually plays
                 setIsLoading(false);
                 hideError();
+                setHasStartedPlaying(true);
             });
 
             art.on('canplay', () => {
                 setIsLoading(false);
+                setHasStartedPlaying(true);
             });
 
             art.on('error', (err: any) => {
@@ -682,18 +698,39 @@ export default function Player({
                 // Hide loading overlay
                 setIsLoading(false);
 
-                // Cleanup media players
-                cleanupHls();
-                cleanupDash();
-
-                // Show error and schedule close
-                showError();
-                if (errorTimeoutRef.current) {
-                    clearTimeout(errorTimeoutRef.current);
+                // Prevent multiple error handling
+                if (channelTransitioning) {
+                    console.log('[Player] Already transitioning, ignoring error');
+                    return;
                 }
-                errorTimeoutRef.current = setTimeout(() => {
-                    try { onClose(); } catch (e) {}
-                }, 1200);
+
+                // Check if channel was already playing
+                if (hasStartedPlaying) {
+                    // Channel was playing - auto-move to next channel
+                    console.log('[Player] Error during playback, auto-moving to next channel');
+                    setChannelTransitioning(true);
+                    
+                    // Show temporary error message
+                    setErrorState({
+                        show: true,
+                        message: 'Error, moving to next channel...'
+                    });
+
+                    // Move to next channel after delay
+                    if (errorTimeoutRef.current) {
+                        clearTimeout(errorTimeoutRef.current);
+                    }
+                    errorTimeoutRef.current = setTimeout(() => {
+                        setChannelTransitioning(false);
+                        handleNextChannel();
+                    }, 1500);
+                } else {
+                    // Error at beginning - show error overlay, don't close modal
+                    console.log('[Player] Error at start, showing error overlay');
+                    cleanupHls();
+                    cleanupDash();
+                    showError();
+                }
             });
 
             // Video element error listener
@@ -716,7 +753,8 @@ export default function Player({
         url, title, license, licenseHeader, type,
         memoizedHeaders,
         getStreamInfo, detectStreamType, getProxyUrl, probeProxied,
-        showError, hideError, cleanupHls, cleanupDash, cleanupAll, onClose
+        showError, hideError, cleanupHls, cleanupDash, cleanupAll, onClose,
+        hasStartedPlaying, channelTransitioning, handleNextChannel
     ]);
 
     // ============================================
@@ -777,25 +815,29 @@ export default function Player({
                             </svg>
                         </div>
                         <h2 className="text-3xl md:text-4xl font-bold text-white tracking-widest uppercase drop-shadow-[0_0_15px_rgba(239,68,68,0.5)]">
-                            Channel Modar
+                            {errorState.message?.includes('moving to next channel') ? 'Stream Error' : 'Channel Error'}
                         </h2>
-                        <p className="text-white/60 text-sm md:text-base font-medium text-center">
-                            Source error or restriction detected!
-                        </p>
                         
-                        {/* Error details */}
-                        {errorState.message && (
+                        {/* Dynamic error message */}
+                        {errorState.message ? (
                             <div className="w-full p-3 bg-red-500/10 border border-red-500/30 rounded-lg">
-                                <p className="text-xs text-red-200 text-center">{errorState.message}</p>
+                                <p className="text-sm text-red-200 text-center animate-pulse">{errorState.message}</p>
                             </div>
+                        ) : (
+                            <p className="text-white/60 text-sm md:text-base font-medium text-center">
+                                Source error or restriction detected!
+                            </p>
                         )}
                         
-                        <button 
-                            onClick={hideError}
-                            className="mt-4 px-6 py-2 bg-white/10 hover:bg-white/20 text-white rounded-full transition-all border border-white/10"
-                        >
-                            Dismiss
-                        </button>
+                        {/* Only show Dismiss button for startup errors (no message or generic message) */}
+                        {!errorState.message?.includes('moving to next channel') && (
+                            <button 
+                                onClick={hideError}
+                                className="mt-4 px-6 py-2 bg-white/10 hover:bg-white/20 text-white rounded-full transition-all border border-white/10"
+                            >
+                                Dismiss
+                            </button>
+                        )}
                     </div>
                 </div>
 
