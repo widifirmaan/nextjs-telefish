@@ -591,7 +591,7 @@ export default function Player({
                     errorTimeoutRef.current = setTimeout(() => {
                         setState(prev => ({ ...prev, isTransitioning: false }));
                         handleNextChannel();
-                    }, 1500);
+                    }, 10000);
                 } else {
                     // Error at start - show overlay
                     cleanupHls();

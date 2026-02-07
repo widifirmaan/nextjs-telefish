@@ -182,6 +182,7 @@ export default function Home() {
       let text = `${i + 1}. [${r.status.toUpperCase()}] ${r.name} (${r.id})\n`;
       text += `   - Playback Method: ${r.playMethod || 'N/A'}\n`;
       text += `   - Stream Type: ${r.streamType || 'N/A'}\n`;
+      text += `   - Original URL: ${r.originalUrl || 'N/A'}\n`;
       text += `   - Proxy URL: ${r.proxyUrl || 'N/A'}\n`;
       if (r.drmKeys) text += `   - DRM Keys: ${r.drmKeys}\n`;
       if (r.error) text += `   - ERROR: ${r.error}\n`;
@@ -230,9 +231,11 @@ export default function Home() {
         setDebugTimeout(timer);
         return () => clearTimeout(timer);
       } else {
-        setDebugActive(false);
-        setDebugIndex(-1);
-        setSelectedChannel(null);
+        stopDebug();
+        // Auto-download when finished automatically
+        setTimeout(() => {
+          downloadDebugReport();
+        }, 500);
       }
     }
   }, [debugActive, debugIndex, playlist]);
@@ -575,6 +578,11 @@ export default function Home() {
                           <p className="text-gray-200">{result.streamType || 'N/A'}</p>
                         </div>
                         <div className="space-y-1">
+                          <p className="text-gray-500 uppercase text-[9px]">Original URL</p>
+                          <p className="text-gray-200 break-all truncate hover:whitespace-normal cursor-help mb-2" title={result.originalUrl}>
+                            {result.originalUrl || 'N/A'}
+                          </p>
+
                           <p className="text-gray-500 uppercase text-[9px]">Proxy URL</p>
                           <p className="text-gray-200 break-all truncate hover:whitespace-normal cursor-help" title={result.proxyUrl}>
                             {result.proxyUrl || 'N/A'}
