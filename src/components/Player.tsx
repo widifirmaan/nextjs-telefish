@@ -68,6 +68,7 @@ export default function Player({
 }: PlayerProps) {
     const artRef = useRef<Artplayer | null>(null);
     const containerRef = useRef<HTMLDivElement>(null);
+    const engineRef = useRef<any>(null);
 
     // =========================================================================
     // HLS (m3u8) Setup - Replicates ExoPlayer behavior via HLS.js Interception
@@ -88,8 +89,12 @@ export default function Player({
             // This ensures HLS.js resolves relative paths correctly against the original domain.
             hls.loadSource(sourceUrl);
             hls.attachMedia(video);
+            engineRef.current = hls;
 
-            art.on('destroy', () => hls.destroy());
+            art.on('destroy', () => {
+                hls.destroy();
+                if (engineRef.current === hls) engineRef.current = null;
+            });
         } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
             // Safari Native HLS: We can't intercept requests easily.
             // We must use the direct proxy URL. 
@@ -121,7 +126,12 @@ export default function Player({
             });
             flv.attachMediaElement(video);
             flv.load();
-            art.on('destroy', () => flv.destroy());
+            engineRef.current = flv;
+
+            art.on('destroy', () => {
+                flv.destroy();
+                if (engineRef.current === flv) engineRef.current = null;
+            });
         } else {
             art.notice.show = 'flv.js is not supported';
         }
@@ -204,13 +214,17 @@ export default function Player({
             try {
                 // Load the ORIGINAL URL. Shaka resolves relative paths against this.
                 // The network filter then proxies the actual request.
+                engineRef.current = player;
                 await player.load(sourceUrl);
             } catch (e: any) {
                 console.error("Shaka Error", e);
                 art.notice.show = "Error loading stream: " + e.message;
             }
 
-            art.on('destroy', () => player.destroy());
+            art.on('destroy', () => {
+                player.destroy();
+                if (engineRef.current === player) engineRef.current = null;
+            });
         } else {
             art.notice.show = "Browser does not support DASH";
         }
@@ -314,6 +328,24 @@ export default function Player({
 
         return () => {
             window.removeEventListener('keydown', handleKeyDown);
+            
+            // 1. Destroy Engine (HLS, Shaka, etc)
+            if (engineRef.current) {
+                console.log("[Player] Explicitly destroying engine in cleanup");
+                try {
+                    if (typeof engineRef.current.destroy === 'function') {
+                        engineRef.current.destroy();
+                    } else if (typeof engineRef.current.unload === 'function') {
+                        engineRef.current.unload();
+                        engineRef.current.destroy();
+                    }
+                } catch (e) {
+                    console.error("[Player] Engine destroy failed", e);
+                }
+                engineRef.current = null;
+            }
+
+            // 2. Destroy Artplayer
             if (artRef.current) {
                 // Pause before destroy to prevent AbortError in some browsers
                 const video = artRef.current.video;

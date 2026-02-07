@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useMemo } from 'react';
+import { useEffect, useState, useMemo, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Search, Play, Tv2, Globe, Filter, Heart, History, X, RefreshCw, Calendar, Flag, Bug, Download } from 'lucide-react';
 import { Channel, PlaylistData, DebugResult } from '@/types';
@@ -169,7 +169,7 @@ export default function Home() {
     URL.revokeObjectURL(url);
   };
 
-  const handleDebugInfo = (info: any) => {
+  const handleDebugInfo = useCallback((info: any) => {
     if (!debugActive || debugIndex < 0) return;
     
     setDebugResults(prev => {
@@ -183,7 +183,8 @@ export default function Home() {
       }
       return next;
     });
-  };
+  }, [debugActive, debugIndex]); // This still has dependencies that change often during debug mode, but it's better than nothing. 
+  // Actually, during debug mode it will re-trigger, but during normal playback it won't.
 
   // Handle Debug Cycling
   useEffect(() => {
@@ -229,6 +230,15 @@ export default function Home() {
     const unique = all.filter((v, i, a) => a.findIndex(t => (t.id === v.id)) === i);
     return unique.filter(ch => favorites.includes(ch.id));
   }, [playlist, favorites]);
+
+  const handleChannelChange = useCallback((channel: Channel, index: number) => {
+    setSelectedChannel(channel);
+    // Add to recents
+    setRecents(prev => {
+      const filtered = prev.filter(c => c.id !== channel.id);
+      return [channel, ...filtered].slice(0, 5);
+    });
+  }, []);
 
   const playerChannels = useMemo(() => {
     if (!playlist || !selectedChannel) return [];
@@ -478,14 +488,7 @@ export default function Home() {
           onDebugInfo={handleDebugInfo}
           channels={playerChannels}
           currentIndex={playerIndex}
-          onChannelChange={(channel, index) => {
-            setSelectedChannel(channel);
-            // Add to recents
-            setRecents(prev => {
-              const filtered = prev.filter(c => c.id !== channel.id);
-              return [channel, ...filtered].slice(0, 5);
-            });
-          }}
+          onChannelChange={handleChannelChange}
         />
       )}
 
