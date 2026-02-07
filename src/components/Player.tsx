@@ -6,14 +6,16 @@ import Artplayer from 'artplayer';
 import Hls from 'hls.js';
 import { X } from 'lucide-react';
 
+import { Channel } from '@/types';
+
 interface PlayerProps {
     url: string;
     title: string;
     onClose: () => void;
     // Optional props for playlist navigation if needed later
-    channels?: any[];
+    channels?: Channel[];
     currentIndex?: number;
-    onChannelChange?: (channel: any, index: number) => void;
+    onChannelChange?: (channel: Channel, index: number) => void;
     // Special props often used for DRM or headers
     license?: string;
     licenseHeader?: string;
@@ -313,7 +315,15 @@ export default function Player({
         return () => {
             window.removeEventListener('keydown', handleKeyDown);
             if (artRef.current) {
+                // Pause before destroy to prevent AbortError in some browsers
+                const video = artRef.current.video;
+                if (video) {
+                    video.pause();
+                    video.src = "";
+                    video.load();
+                }
                 artRef.current.destroy(false);
+                artRef.current = null;
             }
         };
     }, [url, title, type, playHls, playDash, playFlv, onDebugInfo, channels, currentIndex, onChannelChange]);

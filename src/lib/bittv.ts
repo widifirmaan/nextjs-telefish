@@ -1,25 +1,4 @@
-export interface Channel {
-    id: string;
-    name: string;
-    tagline?: string;
-    hls: string;
-    namespace?: string;
-    is_live?: string;
-    is_movie?: string;
-    image?: string;
-    header_iptv?: string;
-    url_license?: string;
-    header_license?: string;
-    jenis?: string;
-    [key: string]: any;
-}
-
-export interface PlaylistData {
-    indonesia: Channel[];
-    event: Channel[];
-    version: string;
-    lastUpdated: number;
-}
+import { Channel, PlaylistData } from '@/types';
 
 const BASE_URL = "https://raw.githubusercontent.com/brodatv1/lite/main";
 const GITHUB_API_URL = "https://api.github.com/repos/brodatv1/lite/contents/";

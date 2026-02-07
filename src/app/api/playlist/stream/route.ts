@@ -80,6 +80,7 @@ async function handleRequest(request: NextRequest) {
             headers: headers,
             body: body,
             redirect: 'follow',
+            signal: request.signal // Stop proxying if the client disconnects
         });
 
         // Response Headers
@@ -163,6 +164,10 @@ async function handleRequest(request: NextRequest) {
         });
 
     } catch (e: any) {
+        if (e.name === 'AbortError') {
+            console.log(`[Proxy] Aborted by client: ${targetUrl}`);
+            return new NextResponse(null, { status: 499 }); // Client Closed Request
+        }
         console.error(`[Proxy Error] URL: ${targetUrl}`, e);
         return new NextResponse(JSON.stringify({ 
             error: e.message,
