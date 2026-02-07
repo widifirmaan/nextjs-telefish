@@ -157,6 +157,9 @@ async function handleRequest(request: NextRequest) {
             };
 
             if (isM3u8) {
+                // Force correct Content-Type for Safari/iOS
+                responseHeaders.set('Content-Type', 'application/vnd.apple.mpegurl');
+                
                 // Rewrite every line that isn't a comment/tag, and certain tags with URIs
                 newText = originalText.split('\n').map(line => {
                     const trimmed = line.trim();
@@ -174,8 +177,8 @@ async function handleRequest(request: NextRequest) {
                 }).join('\n');
 
             } else if (isMpd) {
-                 // For DASH, ensure BaseURL is present and proxied if necessary
-                 // (Though Shaka usually handles this via RequestFilter, native players might need it)
+                 responseHeaders.set('Content-Type', 'application/dash+xml');
+                 // For DASH...
                  if (!newText.includes('<BaseURL>')) {
                       const mpdMatch = newText.match(/<MPD[^>]*>/i);
                       if (mpdMatch) {
@@ -185,6 +188,9 @@ async function handleRequest(request: NextRequest) {
                       }
                  }
             }
+
+            // Prevent caching of rewritten manifests
+            responseHeaders.set('Cache-Control', 'no-cache, no-store, must-revalidate');
 
             return new NextResponse(newText, {
                 status: 200,

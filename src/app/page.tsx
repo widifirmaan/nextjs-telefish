@@ -482,7 +482,7 @@ export default function Home() {
 
       {/* Video Player Modal */}
       {selectedChannel && (
-        isWebKit ? (
+        (isWebKit && (selectedChannel.jenis === 'm3u8' || selectedChannel.hls.includes('.m3u8'))) ? (
           <WebKitPlayer
             url={selectedChannel.hls}
             title={selectedChannel.name}
