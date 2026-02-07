@@ -6,6 +6,7 @@ import { Search, Play, Tv2, Globe, Filter, Heart, History, X, RefreshCw, Calenda
 import { Channel, PlaylistData, DebugResult } from '@/types';
 import ChannelCard from '@/components/ChannelCard';
 import Player from '@/components/Player';
+import WebKitPlayer from '@/components/WebKitPlayer';
 import clsx from 'clsx';
 
 export default function Home() {
@@ -15,6 +16,7 @@ export default function Home() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [activeCategory, setActiveCategory] = useState<'indonesia' | 'event'>('indonesia');
+  const [isWebKit, setIsWebKit] = useState(false);
   
   // Progress bar state
   const [updateProgress, setUpdateProgress] = useState({ 
@@ -87,6 +89,12 @@ export default function Home() {
     }
 
     loadPlaylist();
+
+    // Detect WebKit (Safari, iOS)
+    const ua = navigator.userAgent.toLowerCase();
+    const isSkia = ua.includes('safari') && !ua.includes('chrome') && !ua.includes('android');
+    const isIOS = /ipad|iphone|ipod/.test(ua);
+    setIsWebKit(isSkia || isIOS);
   }, []);
 
   // Save Preferences
@@ -474,22 +482,35 @@ export default function Home() {
 
       {/* Video Player Modal */}
       {selectedChannel && (
-        <Player
-          url={selectedChannel.hls}
-          title={selectedChannel.name}
-          headers={selectedChannel.header_iptv ? JSON.parse(selectedChannel.header_iptv) : undefined}
-          license={selectedChannel.url_license}
-          licenseHeader={selectedChannel.header_license}
-          type={selectedChannel.jenis}
-          onClose={() => {
-            if (debugActive) stopDebug();
-            else setSelectedChannel(null);
-          }}
-          onDebugInfo={handleDebugInfo}
-          channels={playerChannels}
-          currentIndex={playerIndex}
-          onChannelChange={handleChannelChange}
-        />
+        isWebKit ? (
+          <WebKitPlayer
+            url={selectedChannel.hls}
+            title={selectedChannel.name}
+            headers={selectedChannel.header_iptv ? JSON.parse(selectedChannel.header_iptv) : undefined}
+            onClose={() => {
+              if (debugActive) stopDebug();
+              else setSelectedChannel(null);
+            }}
+            onDebugInfo={handleDebugInfo}
+          />
+        ) : (
+          <Player
+            url={selectedChannel.hls}
+            title={selectedChannel.name}
+            headers={selectedChannel.header_iptv ? JSON.parse(selectedChannel.header_iptv) : undefined}
+            license={selectedChannel.url_license}
+            licenseHeader={selectedChannel.header_license}
+            type={selectedChannel.jenis}
+            onClose={() => {
+              if (debugActive) stopDebug();
+              else setSelectedChannel(null);
+            }}
+            onDebugInfo={handleDebugInfo}
+            channels={playerChannels}
+            currentIndex={playerIndex}
+            onChannelChange={handleChannelChange}
+          />
+        )
       )}
 
       {/* Debug Results Modal */}
