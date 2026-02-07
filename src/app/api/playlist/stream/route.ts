@@ -20,6 +20,7 @@ const ANDROID_X_REQUESTED_WITH = 'id.duktek.bittv';
 async function handleRequest(request: NextRequest) {
     const searchParams = request.nextUrl.searchParams;
     const targetUrl = searchParams.get('url');
+    const customHeadersBase64 = searchParams.get('p_headers');
 
     if (!targetUrl) {
         return new NextResponse("Missing 'url' parameter", { status: 400 });
@@ -41,6 +42,37 @@ async function handleRequest(request: NextRequest) {
         headers.set('Referer', ANDROID_REFERER);
         headers.set('Origin', ANDROID_ORIGIN);
         headers.set('X-Requested-With', ANDROID_X_REQUESTED_WITH);
+        
+        // Forward Client IP (Crucial for bypassing region locks on Vercel)
+        const clientIpRaw = request.headers.get('x-forwarded-for') || request.headers.get('x-real-ip');
+        if (clientIpRaw) {
+            const clientIp = clientIpRaw.split(',')[0].trim();
+            headers.set('X-Forwarded-For', clientIp);
+            headers.set('X-Real-IP', clientIp);
+            headers.set('Client-IP', clientIp);
+            headers.set('True-Client-IP', clientIp);
+        }
+
+        // Apply Trans Media (TransTV, Trans7, CNN, CNBC) Specific Hack if URL matches
+        if (targetUrl.includes('transtv') || targetUrl.includes('trans7') || 
+            targetUrl.includes('cnnindonesia') || targetUrl.includes('cnbcindonesia') ||
+            targetUrl.includes('detik')) {
+             headers.set('Referer', 'https://www.transtv.co.id/');
+             headers.set('Origin', 'https://www.transtv.co.id');
+        }
+
+        // Apply Custom Headers from URL parameter (if provided)
+        if (customHeadersBase64) {
+            try {
+                const decodedJson = Buffer.from(customHeadersBase64, 'base64').toString('utf8');
+                const pHeaders = JSON.parse(decodedJson);
+                Object.entries(pHeaders).forEach(([key, value]) => {
+                    headers.set(key, String(value));
+                });
+            } catch (e) {
+                console.error("[Proxy] Failed to parse p_headers", e);
+            }
+        }
         
         // Forward Content-Type for POST/PUT requests
         const reqContentType = request.headers.get('content-type');

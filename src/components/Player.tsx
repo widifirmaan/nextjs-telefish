@@ -29,12 +29,27 @@ const PROXY_BASE = '/api/playlist/stream';
 /**
  * Encodes a target URL into a proxy URL
  */
-const getProxyUrl = (targetUrl: string): string => {
+const getProxyUrl = (targetUrl: string, customHeaders?: any): string => {
     // Prevent double proxying or proxying local internal routes
     if (targetUrl.startsWith('/') || targetUrl.includes(PROXY_BASE)) return targetUrl;
     // Only proxy external URLs
     if (!targetUrl.startsWith('http')) return targetUrl;
-    return `${PROXY_BASE}?url=${encodeURIComponent(targetUrl)}`;
+    
+    let url = `${PROXY_BASE}?url=${encodeURIComponent(targetUrl)}`;
+    
+    if (customHeaders && Object.keys(customHeaders).length > 0) {
+        try {
+            const headerStr = JSON.stringify(customHeaders);
+            const base64 = typeof window !== 'undefined' 
+                ? btoa(headerStr) 
+                : Buffer.from(headerStr).toString('base64');
+            url += `&p_headers=${encodeURIComponent(base64)}`;
+        } catch (e) {
+            console.error("Failed to encode custom headers", e);
+        }
+    }
+    
+    return url;
 };
 
 /**
@@ -81,7 +96,7 @@ export default function Player({
                 xhrSetup: (xhr, url) => {
                     // Url here is what HLS.js thinks it is fetching (e.g. resolved relative segment)
                     // We route it through the proxy
-                    xhr.open('GET', getProxyUrl(url), true);
+                    xhr.open('GET', getProxyUrl(url, headers), true);
                     xhr.withCredentials = false;
                 }
             });
@@ -104,7 +119,7 @@ export default function Player({
             // However, most modern HLS streams use absolute or we rely on the generic proxy behavior.
             // If Safari fails, we might need a specific Safari-rewrite mode in proxy, but let's try direct first.
             // Actually, simply pointing to proxyUrl works IF the m3u8 uses absolute URLs.
-            video.src = getProxyUrl(sourceUrl);
+            video.src = getProxyUrl(sourceUrl, headers);
         }
     }, []);
 
@@ -118,7 +133,7 @@ export default function Player({
         if (flvjs.default.isSupported()) {
             const flv = flvjs.default.createPlayer({
                 type: 'flv',
-                url: getProxyUrl(sourceUrl),
+                url: getProxyUrl(sourceUrl, headers),
                 cors: true,
                 isLive: true
             }, {
@@ -158,7 +173,7 @@ export default function Player({
             // Networking Engine Interceptor
             // This is where we force all traffic (Manifest, Segments, License) through our Android proxy
             player.getNetworkingEngine().registerRequestFilter((type: any, request: any) => {
-                request.uris = request.uris.map((uri: string) => getProxyUrl(uri));
+                request.uris = request.uris.map((uri: string) => getProxyUrl(uri, headers));
             });
 
             // DRM Configuration
@@ -302,7 +317,7 @@ export default function Player({
                     playMethod: isDash(url, type) ? 'Shaka' : isFlv(url, type) ? 'mpegts.js' : 'HLS.js',
                     streamType: type || 'auto',
                     originalUrl: url,
-                    proxyUrl: getProxyUrl(url)
+                    proxyUrl: getProxyUrl(url, headers)
                 });
             }
         });
