@@ -12,6 +12,7 @@
     "artplayer": "^5.3.0",
     "clsx": "^2.1.1",
     "dashjs": "^5.1.1",
+    "flv.js": "^1.6.2",
     "framer-motion": "^12.29.2",
     "hls.js": "^1.6.15",
     "lucide-react": "^0.563.0",
