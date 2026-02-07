@@ -79,22 +79,19 @@ async function handleRequest(request: NextRequest) {
             headers.set('Content-Type', reqContentType);
         }
         
+        // Forward Range header correctly - crucial for Safari/iOS
         const incomingRange = request.headers.get('range');
-        const isManifest = targetUrl.includes('.m3u8') || targetUrl.includes('.mpd');
-        const isFlv = targetUrl.includes('.flv');
-        
         if (incomingRange) {
             headers.set('Range', incomingRange);
-        } else if (!isManifest && !isFlv) {
-             // Force Range for media segments (but NOT manifests or live FLV)
-             headers.set('Range', 'bytes=0-');
         }
+        
+        const isManifest = targetUrl.includes('.m3u8') || targetUrl.includes('.mpd');
+        const isFlv = targetUrl.includes('.flv');
         
         const incomingAccept = request.headers.get('accept');
         headers.set('Accept', incomingAccept || '*/*');
 
         headers.set('Connection', 'Keep-Alive');
-        headers.set('Accept-Encoding', 'gzip');
         
         // Debug headers
         console.log(`[Proxy] ${request.method} to ${targetUrl}`);
@@ -105,16 +102,16 @@ async function handleRequest(request: NextRequest) {
             body = await request.arrayBuffer();
         }
 
-        // Fetch
+        // Fetch from upstream
         const response = await fetch(targetUrl, {
             method: request.method,
             headers: headers,
             body: body,
             redirect: 'follow',
-            signal: request.signal // Stop proxying if the client disconnects
+            signal: request.signal
         });
 
-        // Response Headers
+        // Prepare Response Headers
         const responseHeaders = new Headers(response.headers);
         responseHeaders.set('Access-Control-Allow-Origin', '*');
         responseHeaders.set('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
@@ -125,8 +122,8 @@ async function handleRequest(request: NextRequest) {
         responseHeaders.delete('content-length');
 
         const finalContentType = responseHeaders.get('content-type') || '';
-        const isM3u8 = finalContentType.includes('mpegurl') || targetUrl.includes('.m3u8');
-        const isMpd = finalContentType.includes('dash+xml') || targetUrl.includes('.mpd');
+        const isM3u8 = finalContentType.includes('mpegurl') || targetUrl.endsWith('.m3u8') || targetUrl.includes('.m3u8?');
+        const isMpd = finalContentType.includes('dash+xml') || targetUrl.endsWith('.mpd') || targetUrl.includes('.mpd?');
 
         if (!response.ok) {
             const errorText = await response.text();
@@ -137,49 +134,55 @@ async function handleRequest(request: NextRequest) {
             });
         }
 
-        // Rewrite Manifests ...
+        // --- MANIFEST REWRITING (Crucial for Safari/WebKit) ---
         if (request.method === 'GET' && (isM3u8 || isMpd)) {
             const originalText = await response.text();
             let newText = originalText;
             const finalUrl = response.url || targetUrl;
             const baseUrl = finalUrl.substring(0, finalUrl.lastIndexOf('/') + 1);
 
+            // Helper to wrap a URL in our proxy, carrying over p_headers if present
+            const wrapInProxy = (url: string) => {
+                let absoluteUrl = url;
+                if (!url.startsWith('http')) {
+                    try { absoluteUrl = new URL(url, baseUrl).toString(); } catch (e) { return url; }
+                }
+                
+                // Construct the new proxy URL for this segment/variant
+                let proxiedUrl = `${request.nextUrl.origin}${request.nextUrl.pathname}?url=${encodeURIComponent(absoluteUrl)}`;
+                if (customHeadersBase64) {
+                    proxiedUrl += `&p_headers=${encodeURIComponent(customHeadersBase64)}`;
+                }
+                return proxiedUrl;
+            };
+
             if (isM3u8) {
+                // Rewrite every line that isn't a comment/tag, and certain tags with URIs
                 newText = originalText.split('\n').map(line => {
                     const trimmed = line.trim();
                     if (!trimmed) return line;
+
                     if (trimmed.startsWith('#')) {
-                        // Rewrite URI inside tags
-                         if (trimmed.startsWith('#EXT-X-KEY:') || trimmed.startsWith('#EXT-X-MAP:')) {
-                            return trimmed.replace(/URI="([^"]+)"/, (_, uri) => {
-                                if (uri.startsWith('http')) return `URI="${uri}"`;
-                                try { return `URI="${new URL(uri, baseUrl).toString()}"`; } catch (e) { return `URI="${uri}"`; }
-                            });
-                        }
-                        return line;
+                        // Rewrite URI inside tags like #EXT-X-KEY, #EXT-X-MAP, #EXT-X-MEDIA
+                        return trimmed.replace(/URI="([^"]+)"/g, (match, uri) => {
+                            return `URI="${wrapInProxy(uri)}"`;
+                        });
                     }
-                    // Rewrite segment URL
-                    if (trimmed.startsWith('http')) return trimmed;
-                    try { return new URL(trimmed, baseUrl).toString(); } catch (e) { return trimmed; }
+                    
+                    // This is a segment or a variant playlist URL
+                    return wrapInProxy(trimmed);
                 }).join('\n');
 
             } else if (isMpd) {
-                 // Rewrite DASH: Inject BaseURL if not present, or ensure it's absolute
+                 // For DASH, ensure BaseURL is present and proxied if necessary
+                 // (Though Shaka usually handles this via RequestFilter, native players might need it)
                  if (!newText.includes('<BaseURL>')) {
-                     const mpdMatch = newText.match(/<MPD[^>]*>/i);
-                     if (mpdMatch) {
-                        const mpdTag = mpdMatch[0];
-                        const idx = newText.indexOf(mpdTag) + mpdTag.length;
-                        newText = newText.slice(0, idx) + `\n  <BaseURL>${baseUrl}</BaseURL>` + newText.slice(idx);
-                     }
-                 } else {
-                     newText = newText.replace(/<BaseURL>(.*?)<\/BaseURL>/g, (match, content) => {
-                         const trimmed = content.trim();
-                         if (trimmed.startsWith('http')) return match;
-                         try {
-                              return `<BaseURL>${new URL(trimmed, baseUrl).toString()}</BaseURL>`;
-                         } catch (e) { return match; }
-                     });
+                      const mpdMatch = newText.match(/<MPD[^>]*>/i);
+                      if (mpdMatch) {
+                         const mpdTag = mpdMatch[0];
+                         const idx = newText.indexOf(mpdTag) + mpdTag.length;
+                         newText = newText.slice(0, idx) + `\n  <BaseURL>${baseUrl}</BaseURL>` + newText.slice(idx);
+                      }
                  }
             }
 

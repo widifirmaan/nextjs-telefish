@@ -47,27 +47,31 @@ export default function WebKitPlayer({
 }: WebKitPlayerProps) {
     const videoRef = useRef<HTMLVideoElement>(null);
 
+    const [error, setError] = useState<string | null>(null);
+    const [retryCount, setRetryCount] = useState(0);
+
     const initPlayer = useCallback(() => {
         const video = videoRef.current;
         if (!video) return;
 
+        setError(null);
         const proxyUrl = getProxyUrl(url, headers);
-        console.log("[WebKitPlayer] Initializing with URL:", proxyUrl);
+        console.log(`[WebKitPlayer] Init effort #${retryCount + 1}`, proxyUrl);
         
         video.src = proxyUrl;
         video.load();
 
-        // Handle Play Promise to avoid AbortError
         const playPromise = video.play();
         if (playPromise !== undefined) {
-            playPromise.catch(error => {
-                console.warn("[WebKitPlayer] Autoplay prevented or aborted:", error);
+            playPromise.catch(err => {
+                if (err.name !== 'AbortError') {
+                    console.warn("[WebKitPlayer] Playback failed:", err);
+                }
             });
         }
 
-        // Basic event listeners for debugging
         const handlePlay = () => {
-            console.log("[WebKitPlayer] Playback started");
+            setRetryCount(0); // Reset on success
             if (onDebugInfo) {
                 onDebugInfo({
                     status: 'ok',
@@ -80,14 +84,32 @@ export default function WebKitPlayer({
         };
 
         const handleError = () => {
-            const error = video.error;
-            console.error('Native Player Error:', error?.code, error?.message);
+            const err = video.error;
+            let msg = `Error ${err?.code}: `;
+            
+            switch(err?.code) {
+                case 1: msg += "Playback Aborted"; break;
+                case 2: msg += "Network Error"; break;
+                case 3: msg += "Decoding Failed"; break;
+                case 4: msg += "Stream not supported"; break;
+                default: msg += "Unknown error";
+            }
+
+            console.error('[WebKitPlayer]', msg);
+            setError(msg);
+
             if (onDebugInfo) {
                 onDebugInfo({
                     status: 'error',
-                    error: `Code ${error?.code}: ${error?.message || 'Native WebKit error'}`,
+                    error: msg,
                     originalUrl: url
                 });
+            }
+
+            // Auto-Retry logic for network/abort errors
+            if (retryCount < 3 && (err?.code === 1 || err?.code === 2)) {
+                console.log("[WebKitPlayer] Retrying in 2s...");
+                setTimeout(() => setRetryCount(prev => prev + 1), 2000);
             }
         };
 
@@ -101,7 +123,7 @@ export default function WebKitPlayer({
             video.removeAttribute('src');
             video.load();
         };
-    }, [url, headers, onDebugInfo]);
+    }, [url, headers, onDebugInfo, retryCount]);
 
     useEffect(() => {
         const cleanup = initPlayer();
@@ -123,6 +145,19 @@ export default function WebKitPlayer({
                     muted
                     playsInline
                 />
+
+                {/* Error Overlay */}
+                {error && (
+                    <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/60 backdrop-blur-sm z-20">
+                        <p className="text-white font-medium mb-4">{error}</p>
+                        <button 
+                            onClick={() => { setRetryCount(0); initPlayer(); }}
+                            className="px-6 py-2 bg-primary text-white rounded-full hover:scale-105 transition-transform"
+                        >
+                            Retry Now
+                        </button>
+                    </div>
+                )}
                 
                 {/* Header */}
                 <div className="absolute top-0 left-0 right-0 p-4 bg-gradient-to-b from-black/80 to-transparent pointer-events-none z-10">
