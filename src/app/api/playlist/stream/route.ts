@@ -8,11 +8,11 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 
-export const runtime = 'edge';
+export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
 // Configuration for impersonating an Android device (BitTV App)
-const ANDROID_USER_AGENT = 'Mozilla/5.0 (Linux; Android 13; Pixel 7 Build/TQ1A.231105.002) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Mobile Safari/537.36';
+const EXOPLAYER_UA = 'Dalvik/2.1.0 (Linux; U; Android 13; Pixel 7 Build/TQ1A.231105.002) ExoPlayerLib/2.18.2';
 const ANDROID_REFERER = 'https://duktek.id/';
 const ANDROID_ORIGIN = 'https://duktek.id';
 const ANDROID_X_REQUESTED_WITH = 'id.duktek.bittv';
@@ -36,9 +36,9 @@ async function handleRequest(request: NextRequest) {
     }
 
     try {
-        // Headers - Mimic BitTV Android App (WebView based)
+        // Headers - Mimic BitTV Android App (ExoPlayer based)
         const headers = new Headers();
-        headers.set('User-Agent', ANDROID_USER_AGENT);
+        headers.set('User-Agent', EXOPLAYER_UA);
         headers.set('Referer', ANDROID_REFERER);
         headers.set('Origin', ANDROID_ORIGIN);
         headers.set('X-Requested-With', ANDROID_X_REQUESTED_WITH);
@@ -51,12 +51,11 @@ async function handleRequest(request: NextRequest) {
             headers.set('X-Real-IP', clientIp);
             headers.set('Client-IP', clientIp);
             headers.set('True-Client-IP', clientIp);
+            headers.set('X-Originating-IP', clientIp);
         }
 
         // Apply Trans Media (TransTV, Trans7, CNN, CNBC) Specific Hack if URL matches
-        if (targetUrl.includes('transtv') || targetUrl.includes('trans7') || 
-            targetUrl.includes('cnnindonesia') || targetUrl.includes('cnbcindonesia') ||
-            targetUrl.includes('detik')) {
+        if (/transtv|trans7|cnnindonesia|cnbcindonesia|detik/.test(targetUrl)) {
              headers.set('Referer', 'https://www.transtv.co.id/');
              headers.set('Origin', 'https://www.transtv.co.id');
         }
