@@ -19,52 +19,75 @@ export async function POST(request: NextRequest) {
         const licenseParam = searchParams.get('license');
         
         if (!licenseParam) {
+            console.error('[ClearKey] No license parameter provided');
             return NextResponse.json({ error: 'Missing license parameter' }, { status: 400 });
         }
         
-        // Decode the license data (same format as BitTV APK)
-        const normalizedLicense = licenseParam.replace(/-/g, '+').replace(/_/g, '/');
-        const paddedLicense = normalizedLicense.length % 4 === 0 
-            ? normalizedLicense 
-            : normalizedLicense + '='.repeat(4 - (normalizedLicense.length % 4));
-        
-        const jsonStr = Buffer.from(paddedLicense, 'base64').toString('utf8');
-        const licenseData = JSON.parse(jsonStr);
-        
-        if (!licenseData.keys || !Array.isArray(licenseData.keys)) {
-            return NextResponse.json({ error: 'Invalid license data format' }, { status: 400 });
+        // 1. Get requested kids from body
+        let requestedKids: string[] = [];
+        try {
+            const body = await request.json();
+            console.log('[ClearKey] Request Body:', body);
+            if (body && body.kids) {
+                requestedKids = body.kids;
+            }
+        } catch (e) {
+            console.log('[ClearKey] No valid JSON body or empty body');
+        }
+
+        // 2. Decode the license key set from the query param
+        let licenseData;
+        try {
+            const normalizedLicense = licenseParam.replace(/-/g, '+').replace(/_/g, '/');
+            const paddedLicense = normalizedLicense.padEnd(normalizedLicense.length + (4 - normalizedLicense.length % 4) % 4, '=');
+            const jsonStr = Buffer.from(paddedLicense, 'base64').toString('utf8');
+            licenseData = JSON.parse(jsonStr);
+        } catch (e: any) {
+            console.error('[ClearKey] License decode failed:', e.message);
+            return NextResponse.json({ error: 'License decoding failed' }, { status: 400 });
         }
         
-        // Helper to convert base64 to base64url
+        if (!licenseData.keys || !Array.isArray(licenseData.keys)) {
+            return NextResponse.json({ error: 'Invalid keys format' }, { status: 400 });
+        }
+        
         const base64ToBase64Url = (base64: string) => {
             return base64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
         };
         
-        // Build EME ClearKey license response
-        const clearKeyResponse = {
-            keys: licenseData.keys.map((k: { kid: string; k: string }) => ({
+        // 3. Filter keys if kids are requested, otherwise return all
+        // Shaka usually sends base64url encoded kids in the request
+        const responseKeys = licenseData.keys
+            .map((k: { kid: string; k: string }) => ({
                 kty: "oct",
                 kid: base64ToBase64Url(k.kid),
                 k: base64ToBase64Url(k.k)
-            })),
-            type: "temporary"
+            }));
+            
+        // Log what we found
+        console.log(`[ClearKey] Found ${responseKeys.length} keys. Requested kids:`, requestedKids);
+
+        const clearKeyResponse = {
+            keys: responseKeys
         };
         
-        console.log('[ClearKey Server] Returning license response:', clearKeyResponse);
-        
-        return NextResponse.json(clearKeyResponse, {
+        return new NextResponse(JSON.stringify(clearKeyResponse), {
+            status: 200,
             headers: {
                 'Access-Control-Allow-Origin': '*',
-                'Access-Control-Allow-Methods': 'POST, OPTIONS',
-                'Access-Control-Allow-Headers': 'Content-Type',
                 'Content-Type': 'application/json'
             }
         });
         
     } catch (e: any) {
-        console.error('[ClearKey Server] Error:', e);
+        console.error('[ClearKey Server] Global Error:', e);
         return NextResponse.json({ error: e.message }, { status: 500 });
     }
+}
+
+export async function GET(request: NextRequest) {
+    // Redirect GET to POST logic for easy debugging
+    return POST(request);
 }
 
 export async function OPTIONS() {

@@ -16,7 +16,10 @@ interface PlayerProps {
     onChannelChange?: (channel: any, index: number) => void;
     // Special props often used for DRM or headers
     license?: string;
+    licenseHeader?: string;
+    headers?: any;
     type?: string; 
+    onDebugInfo?: (info: any) => void;
 }
 
 const PROXY_BASE = '/api/playlist/stream';
@@ -48,7 +51,19 @@ const isDash = (url: string, type?: string) => {
     return (type === 'mpd' || url.includes('.mpd') || type === 'dash');
 };
 
-export default function Player({ url, title, onClose, license, type }: PlayerProps) {
+export default function Player({ 
+    url, 
+    title, 
+    onClose, 
+    license, 
+    licenseHeader, 
+    headers, 
+    type, 
+    onDebugInfo, 
+    channels, 
+    currentIndex, 
+    onChannelChange 
+}: PlayerProps) {
     const artRef = useRef<Artplayer | null>(null);
     const containerRef = useRef<HTMLDivElement>(null);
 
@@ -130,23 +145,57 @@ export default function Player({ url, title, onClose, license, type }: PlayerPro
             });
 
             // DRM Configuration
-            const drmConfig: any = { servers: {} };
+            const drmConfig: any = { 
+                servers: {},
+                advanced: {},
+                clearKeys: {}
+            };
+            
+            // Parse license headers if provided
+            let licenseHeaders = {};
+            if (licenseHeader) {
+                try {
+                    licenseHeaders = JSON.parse(licenseHeader);
+                } catch (e) {
+                    console.error("Failed to parse license headers", e);
+                }
+            }
             
             // Handle ClearKey
             if (type?.includes('clearkey') && license) {
-                // If license is a URL, use it, otherwise assume it's the encoded keys and route to our local server
-                const licenseServer = license.startsWith('http') 
-                    ? license 
-                    : `/api/drm/clearkey?license=${encodeURIComponent(license)}`;
-                
-                drmConfig.servers['org.w3.clearkey'] = licenseServer;
+                if (license.startsWith('http')) {
+                    drmConfig.servers['org.w3.clearkey'] = license;
+                    drmConfig.advanced['org.w3.clearkey'] = {
+                        headers: licenseHeaders
+                    };
+                } else {
+                    // Use Shaka's direct clearKeys map - much more reliable than local license server
+                    try {
+                        const decoded = Buffer.from(license, 'base64').toString('utf8');
+                        const parsed = JSON.parse(decoded);
+                        if (parsed.keys) {
+                            parsed.keys.forEach((k: any) => {
+                                // Shaka clearKeys expects: { 'kid_hex': 'k_hex' }
+                                const kidHex = Buffer.from(k.kid.replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('hex');
+                                const kHex = Buffer.from(k.k.replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('hex');
+                                drmConfig.clearKeys[kidHex] = kHex;
+                            });
+                            console.log(`[DRM] Configured ${Object.keys(drmConfig.clearKeys).length} ClearKeys directly`);
+                        }
+                    } catch (e) {
+                        console.error("[DRM] ClearKey local parse failed", e);
+                    }
+                }
             } 
             // Handle Widevine
             else if (license && license.startsWith('http')) {
                 drmConfig.servers['com.widevine.alpha'] = license;
+                drmConfig.advanced['com.widevine.alpha'] = {
+                    headers: licenseHeaders
+                };
             }
 
-            if (Object.keys(drmConfig.servers).length > 0) {
+            if (Object.keys(drmConfig.servers).length > 0 || Object.keys(drmConfig.clearKeys).length > 0) {
                 player.configure({ drm: drmConfig });
             }
 
@@ -218,19 +267,56 @@ export default function Player({ url, title, onClose, license, type }: PlayerPro
 
         artRef.current = art;
 
+        // Success and Debugging
+        art.on('video:play', () => {
+             if (onDebugInfo) {
+                onDebugInfo({
+                    status: 'ok',
+                    playMethod: isDash(url, type) ? 'Shaka' : isFlv(url, type) ? 'mpegts.js' : 'HLS.js',
+                    streamType: type || 'auto',
+                    originalUrl: url,
+                    proxyUrl: getProxyUrl(url)
+                });
+            }
+        });
+
         // Error handling
         art.on('error', (error: any) => {
             console.error('Artplayer Error:', error);
             art.notice.show = 'Stream Error. Retrying...';
-            // Simple retry logic could be added here
+            
+            if (onDebugInfo) {
+                onDebugInfo({
+                    status: 'error',
+                    error: error?.message || 'Artplayer generic error',
+                    originalUrl: url
+                });
+            }
         });
 
+        const handleKeyDown = (e: KeyboardEvent) => {
+            if (!channels || currentIndex === undefined || !onChannelChange) return;
+            
+            if (e.key === 'ArrowRight') {
+                e.preventDefault();
+                const nextIndex = (currentIndex + 1) % channels.length;
+                onChannelChange(channels[nextIndex], nextIndex);
+            } else if (e.key === 'ArrowLeft') {
+                e.preventDefault();
+                const prevIndex = (currentIndex - 1 + channels.length) % channels.length;
+                onChannelChange(channels[prevIndex], prevIndex);
+            }
+        };
+
+        window.addEventListener('keydown', handleKeyDown);
+
         return () => {
+            window.removeEventListener('keydown', handleKeyDown);
             if (artRef.current) {
                 artRef.current.destroy(false);
             }
         };
-    }, [url, title, type, playHls, playDash]);
+    }, [url, title, type, playHls, playDash, playFlv, onDebugInfo, channels, currentIndex, onChannelChange]);
 
     return (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/95 backdrop-blur-xl">
