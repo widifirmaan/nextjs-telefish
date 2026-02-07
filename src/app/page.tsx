@@ -496,12 +496,14 @@ export default function Home() {
           onDebugInfo={handleDebugInfo}
           channels={(() => {
             if (!playlist) return [];
+            if (debugActive) return [...playlist.indonesia, ...playlist.event];
             // Find which group the channel belongs to
             const isInIndo = playlist.indonesia.some(ch => ch.id === selectedChannel.id);
             return isInIndo ? playlist.indonesia : playlist.event;
           })()}
           currentIndex={(() => {
             if (!playlist) return -1;
+            if (debugActive && debugIndex >= 0) return debugIndex;
             const isInIndo = playlist.indonesia.some(ch => ch.id === selectedChannel.id);
             const list = isInIndo ? playlist.indonesia : playlist.event;
             return list.findIndex(ch => ch.id === selectedChannel.id);
