@@ -298,6 +298,16 @@ export default function Home() {
           licenseHeader={selectedChannel.header_license}
           type={selectedChannel.jenis}
           onClose={() => setSelectedChannel(null)}
+          channels={allChannels}
+          currentIndex={allChannels.findIndex(ch => ch.id === selectedChannel.id)}
+          onChannelChange={(channel, index) => {
+            setSelectedChannel(channel);
+            // Add to recents
+            setRecents(prev => {
+              const filtered = prev.filter(c => c.id !== channel.id);
+              return [channel, ...filtered].slice(0, 5);
+            });
+          }}
         />
       )}
     </main>
