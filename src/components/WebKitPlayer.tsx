@@ -52,10 +52,22 @@ export default function WebKitPlayer({
         if (!video) return;
 
         const proxyUrl = getProxyUrl(url, headers);
+        console.log("[WebKitPlayer] Initializing with URL:", proxyUrl);
+        
         video.src = proxyUrl;
+        video.load();
+
+        // Handle Play Promise to avoid AbortError
+        const playPromise = video.play();
+        if (playPromise !== undefined) {
+            playPromise.catch(error => {
+                console.warn("[WebKitPlayer] Autoplay prevented or aborted:", error);
+            });
+        }
 
         // Basic event listeners for debugging
         const handlePlay = () => {
+            console.log("[WebKitPlayer] Playback started");
             if (onDebugInfo) {
                 onDebugInfo({
                     status: 'ok',
@@ -67,12 +79,13 @@ export default function WebKitPlayer({
             }
         };
 
-        const handleError = (e: any) => {
-            console.error('Native Player Error:', video.error);
+        const handleError = () => {
+            const error = video.error;
+            console.error('Native Player Error:', error?.code, error?.message);
             if (onDebugInfo) {
                 onDebugInfo({
                     status: 'error',
-                    error: video.error?.message || 'Native WebKit error',
+                    error: `Code ${error?.code}: ${error?.message || 'Native WebKit error'}`,
                     originalUrl: url
                 });
             }
@@ -107,6 +120,7 @@ export default function WebKitPlayer({
                     className="w-full h-full"
                     controls
                     autoPlay
+                    muted
                     playsInline
                 />
                 
